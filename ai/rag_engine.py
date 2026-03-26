@@ -1,196 +1,168 @@
 """
-rag_engine.py — RAG (Retrieval Augmented Generation) for Finora Chat
-Uses ChromaDB to store and retrieve transaction context intelligently.
+rag_engine.py — FAISS-based RAG for Finora Chat
+Replaces ChromaDB with FAISS — lighter, in-memory, no persistent DB needed.
 
-Instead of dumping all transactions into every prompt, RAG:
-  1. Stores transactions as searchable embeddings in ChromaDB
-  2. When user asks a question, retrieves only the RELEVANT transactions
-  3. Sends those relevant transactions + question to the LLM
+Pipeline:
+  1. Each transaction → text string "Date | Description | Amount | Category"
+  2. Encode with sentence-transformers (all-MiniLM-L6-v2)
+  3. Store in FAISS index
+  4. On query → encode query → retrieve top-K similar transactions
+  5. Pass retrieved transactions as context to LLM
 
-This gives better answers AND handles large transaction histories efficiently.
-
-Requires: pip install chromadb sentence-transformers
+Requires: pip install faiss-cpu sentence-transformers
+Fallback: if FAISS unavailable, falls back to existing full-context chat.
 """
 
-import os
-import json
 import hashlib
+import numpy as np
 import pandas as pd
 
+
 # ─────────────────────────────────────────────
-#  Lazy imports — only load if chromadb available
+#  Availability check
 # ─────────────────────────────────────────────
 
-def _chromadb_available() -> bool:
+def _faiss_available() -> bool:
     try:
-        import chromadb
+        import faiss
         from sentence_transformers import SentenceTransformer
         return True
     except ImportError:
         return False
 
-
-# Global ChromaDB client and collection
-_chroma_client     = None
-_collection        = None
-_embedding_model   = None
-_collection_hash   = None   # tracks which DataFrame is currently loaded
-
-
-def _get_embedding_model():
-    """Load a lightweight sentence transformer for embeddings."""
-    global _embedding_model
-    if _embedding_model is None:
-        from sentence_transformers import SentenceTransformer
-        # all-MiniLM-L6-v2 is small (80MB), fast, and accurate enough for finance
-        _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-    return _embedding_model
-
-
-def _get_collection():
-    """Get or create the ChromaDB collection."""
-    global _chroma_client, _collection
-    if _chroma_client is None:
-        import chromadb
-        # Persist to disk so it survives Streamlit reruns
-        _chroma_client = chromadb.PersistentClient(path=".finora_chroma_db")
-    if _collection is None:
-        _collection = _chroma_client.get_or_create_collection(
-            name="finora_transactions",
-            metadata={"hnsw:space": "cosine"},
-        )
-    return _collection
+# Keep this name so app.py import stays unchanged
+_chromadb_available = _faiss_available
 
 
 # ─────────────────────────────────────────────
-#  Index Transactions
+#  Global state (in-memory, resets on restart)
+# ─────────────────────────────────────────────
+
+_faiss_index    = None
+_documents      = []        # list of text strings, one per transaction
+_metadatas      = []        # list of dicts with date/desc/amount/category
+_model          = None
+_index_hash     = None      # tracks which df is currently indexed
+
+
+# ─────────────────────────────────────────────
+#  Model loader
+# ─────────────────────────────────────────────
+
+def _get_model():
+    global _model
+    if _model is None:
+        from sentence_transformers import SentenceTransformer
+        _model = SentenceTransformer("all-MiniLM-L6-v2")
+    return _model
+
+
+# ─────────────────────────────────────────────
+#  Index transactions into FAISS
 # ─────────────────────────────────────────────
 
 def index_transactions(df: pd.DataFrame) -> bool:
     """
-    Store transactions in ChromaDB as searchable embeddings.
+    Build a FAISS index from transactions.
     Only re-indexes if the DataFrame has changed.
 
-    Args:
-        df: Categorized transactions DataFrame.
-
-    Returns:
-        True if indexed successfully, False if ChromaDB not available.
+    Returns True if indexed successfully, False if FAISS unavailable.
     """
-    global _collection_hash
+    global _faiss_index, _documents, _metadatas, _index_hash
 
-    if not _chromadb_available():
+    if not _faiss_available():
         return False
 
-    # Check if we already indexed this exact DataFrame
+    import faiss
+
+    # Skip if already indexed with same data
     df_hash = hashlib.md5(pd.util.hash_pandas_object(df).values).hexdigest()
-    if df_hash == _collection_hash:
-        return True   # already up to date
+    if df_hash == _index_hash:
+        return True
 
-    collection = _get_collection()
-    model      = _get_embedding_model()
-
-    # Clear existing data
-    try:
-        existing = collection.get()
-        if existing["ids"]:
-            collection.delete(ids=existing["ids"])
-    except Exception:
-        pass
-
-    # Build documents — each transaction becomes a searchable text snippet
+    # ── Build text documents ──────────────────────────────────────────────────
     documents = []
     metadatas = []
-    ids       = []
 
-    for i, row in df.iterrows():
-        # Create a rich text description of each transaction
-        doc = (
-            f"On {row.get('Date', 'unknown date')}, "
-            f"₹{row.get('Amount', 0):,.0f} was spent on "
-            f"{row.get('Description', 'unknown')} "
-            f"in the category {row.get('Category', 'Other')}."
-        )
-        documents.append(doc)
+    for _, row in df.iterrows():
+        date   = str(row.get("Date", ""))
+        desc   = str(row.get("Description", ""))
+        amount = float(row.get("Amount", 0))
+        cat    = str(row.get("Category", "Other"))
+
+        # Rich text format for better semantic search
+        text = f"{date} | {desc} | ₹{amount:,.0f} | {cat}"
+        documents.append(text)
         metadatas.append({
-            "date":        str(row.get("Date", "")),
-            "description": str(row.get("Description", "")),
-            "category":    str(row.get("Category", "Other")),
-            "amount":      float(row.get("Amount", 0)),
+            "date":        date,
+            "description": desc,
+            "amount":      amount,
+            "category":    cat,
         })
-        ids.append(f"txn_{i}")
 
-    # Generate embeddings in batch
-    embeddings = model.encode(documents, show_progress_bar=False).tolist()
+    # ── Generate embeddings ───────────────────────────────────────────────────
+    model      = _get_model()
+    embeddings = model.encode(documents, show_progress_bar=False, batch_size=64)
+    embeddings = np.array(embeddings, dtype="float32")
 
-    # Add to ChromaDB in batches of 100
-    batch_size = 100
-    for start in range(0, len(documents), batch_size):
-        end = min(start + batch_size, len(documents))
-        collection.add(
-            documents=  documents[start:end],
-            embeddings= embeddings[start:end],
-            metadatas=  metadatas[start:end],
-            ids=        ids[start:end],
-        )
+    # Normalize for cosine similarity
+    faiss.normalize_L2(embeddings)
 
-    _collection_hash = df_hash
+    # ── Build FAISS index ─────────────────────────────────────────────────────
+    dim   = embeddings.shape[1]
+    index = faiss.IndexFlatIP(dim)   # Inner Product = cosine on normalized vectors
+    index.add(embeddings)
+
+    _faiss_index = index
+    _documents   = documents
+    _metadatas   = metadatas
+    _index_hash  = df_hash
+
     return True
 
 
 # ─────────────────────────────────────────────
-#  Retrieve Relevant Context
+#  Retrieve relevant transactions
 # ─────────────────────────────────────────────
 
-def retrieve_relevant_context(query: str, n_results: int = 10) -> str:
+def retrieve_relevant_context(query: str, n_results: int = 12) -> str:
     """
-    Given a user question, retrieve the most relevant transactions
-    from ChromaDB and format them as context for the LLM.
-
-    Args:
-        query:     The user's question.
-        n_results: Number of relevant transactions to retrieve.
-
-    Returns:
-        A formatted string of relevant transactions to inject into the prompt.
+    Encode the query, search FAISS, return top matching transactions as text.
+    Returns empty string if FAISS not available or index empty.
     """
-    if not _chromadb_available():
+    if not _faiss_available() or _faiss_index is None or not _documents:
         return ""
 
     try:
-        collection = _get_collection()
-        model      = _get_embedding_model()
+        import faiss
 
-        # Check if collection has data
-        if collection.count() == 0:
-            return ""
+        model        = _get_model()
+        query_vec    = model.encode([query], show_progress_bar=False)
+        query_vec    = np.array(query_vec, dtype="float32")
+        faiss.normalize_L2(query_vec)
 
-        # Embed the query and search
-        query_embedding = model.encode([query]).tolist()[0]
-        results = collection.query(
-            query_embeddings=[query_embedding],
-            n_results=min(n_results, collection.count()),
-        )
+        k       = min(n_results, len(_documents))
+        scores, indices = _faiss_index.search(query_vec, k)
 
-        if not results["documents"] or not results["documents"][0]:
-            return ""
-
-        # Format retrieved transactions
         lines = ["Relevant transactions for your question:"]
-        for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
+        for idx, score in zip(indices[0], scores[0]):
+            if idx < 0:
+                continue
+            m = _metadatas[idx]
             lines.append(
-                f"  • {meta['date']} | {meta['description']} | "
-                f"₹{meta['amount']:,.0f} | {meta['category']}"
+                f"  • {m['date']} | {m['description']} | "
+                f"₹{m['amount']:,.0f} | {m['category']}"
             )
 
         return "\n".join(lines)
 
     except Exception as e:
-        return ""   # fail silently — fallback to regular context
+        print(f"[FAISS] Retrieval error: {e}")
+        return ""
 
 
 # ─────────────────────────────────────────────
-#  RAG-powered Chat
+#  RAG-powered Chat (same signature as before)
 # ─────────────────────────────────────────────
 
 def rag_chat(
@@ -201,54 +173,43 @@ def rag_chat(
     financial_context: str,
 ) -> tuple:
     """
-    Answer a finance question using RAG — retrieves relevant transactions
-    then calls the LLM with targeted context instead of all transactions.
+    Answer a finance question using FAISS RAG.
+    Falls back to regular chat if FAISS is unavailable.
 
-    Falls back to regular chat if ChromaDB is not available.
-
-    Args:
-        user_message:      The user's question.
-        chat_history:      Conversation history.
-        df:                Full transactions DataFrame.
-        monthly_income:    User's monthly income.
-        financial_context: Pre-built summary string (fallback context).
-
-    Returns:
-        (reply, updated_chat_history, used_rag: bool)
+    Returns: (reply, updated_chat_history, used_rag: bool)
     """
     from ai.gemini_ai import chat_with_finances, _call_llm_chat
 
     # Try to index and retrieve
-    indexed = index_transactions(df)
+    indexed   = index_transactions(df)
+    retrieved = retrieve_relevant_context(user_message) if indexed else ""
 
-    if indexed:
-        # RAG path — retrieve relevant context for this specific question
-        retrieved = retrieve_relevant_context(user_message, n_results=15)
-
+    if indexed and retrieved:
         total_spent = df["Amount"].sum()
         savings     = monthly_income - total_spent
 
-        rag_context = f"""USER FINANCIAL SUMMARY:
-Monthly Income : ₹{monthly_income:,.0f}
-Total Spent    : ₹{total_spent:,.0f}
-Savings        : ₹{savings:,.0f}
-Transactions   : {len(df)}
-
-{retrieved}"""
+        rag_context = (
+            f"USER FINANCIAL SUMMARY:\n"
+            f"Monthly Income : ₹{monthly_income:,.0f}\n"
+            f"Total Spent    : ₹{total_spent:,.0f}\n"
+            f"Savings        : ₹{savings:,.0f}\n"
+            f"Transactions   : {len(df)}\n\n"
+            f"{retrieved}"
+        )
 
         system_prompt = (
             "You are Finora, a smart AI financial advisor for Indian users.\n"
-            "Answer the user's question using the transaction data provided below.\n"
-            "Be specific — reference exact amounts, dates, and merchant names.\n"
+            "Answer the user's question using ONLY the transaction data provided below.\n"
+            "Be specific — reference exact amounts, dates, merchant names.\n"
             "Keep answers concise (under 150 words). Use ₹ symbols.\n\n"
             f"{rag_context}\n---"
         )
 
-        # Build message history
+        # Build OpenAI-style message list
         messages = [{"role": "system", "content": system_prompt}]
         for msg in chat_history:
             role = "assistant" if msg["role"] == "model" else "user"
-            text = msg["parts"][0]
+            text = msg["parts"][0] if msg["parts"] else ""
             if "USER'S FINANCIAL DATA" in text and role == "user":
                 text = text.split("User says:")[-1].strip()
             messages.append({"role": role, "content": text})
@@ -259,9 +220,9 @@ Transactions   : {len(df)}
             chat_history.append({"role": "user",  "parts": [user_message]})
             chat_history.append({"role": "model", "parts": [reply]})
             return reply, chat_history, True
-        except Exception:
-            pass   # fall through to regular chat
+        except Exception as e:
+            print(f"[RAG] LLM error: {e}")
 
-    # Fallback — regular chat without RAG
+    # Fallback — regular context injection
     reply, updated = chat_with_finances(user_message, chat_history, financial_context)
     return reply, updated, False
