@@ -1,25 +1,25 @@
 """
-rag_engine.py — FAISS-based RAG for Finora Chat
-Replaces ChromaDB with FAISS — lighter, in-memory, no persistent DB needed.
+rag_engine.py — Hybrid RAG for Finora Chat
+Upgrade: Rule-based filtering BEFORE FAISS for accurate retrieval.
 
 Pipeline:
-  1. Each transaction → text string "Date | Description | Amount | Category"
-  2. Encode with sentence-transformers (all-MiniLM-L6-v2)
-  3. Store in FAISS index
-  4. On query → encode query → retrieve top-K similar transactions
-  5. Pass retrieved transactions as context to LLM
+  1. Detect intent from query (category, month, sort)
+  2. Filter df BEFORE embedding (rule-based pre-filter)
+  3. FAISS cosine search on filtered subset
+  4. Return clean context + explainability metadata
 
 Requires: pip install faiss-cpu sentence-transformers
-Fallback: if FAISS unavailable, falls back to existing full-context chat.
+Fallback: full dataset if filter returns empty, then regular chat if FAISS unavailable.
 """
 
+import re
 import hashlib
 import numpy as np
 import pandas as pd
 
 
 # ─────────────────────────────────────────────
-#  Availability check
+#  Availability
 # ─────────────────────────────────────────────
 
 def _faiss_available() -> bool:
@@ -30,24 +30,17 @@ def _faiss_available() -> bool:
     except ImportError:
         return False
 
-# Keep this name so app.py import stays unchanged
+# Keep old name so app.py import stays unchanged
 _chromadb_available = _faiss_available
 
 
 # ─────────────────────────────────────────────
-#  Global state (in-memory, resets on restart)
+#  Global state
 # ─────────────────────────────────────────────
 
-_faiss_index    = None
-_documents      = []        # list of text strings, one per transaction
-_metadatas      = []        # list of dicts with date/desc/amount/category
-_model          = None
-_index_hash     = None      # tracks which df is currently indexed
+_model      = None
+_index_hash = None   # hash of last indexed df
 
-
-# ─────────────────────────────────────────────
-#  Model loader
-# ─────────────────────────────────────────────
 
 def _get_model():
     global _model
@@ -58,111 +51,265 @@ def _get_model():
 
 
 # ─────────────────────────────────────────────
-#  Index transactions into FAISS
+#  Intent detection
+# ─────────────────────────────────────────────
+
+# Synonym maps — expand query keywords to category keywords
+CATEGORY_SYNONYMS = {
+    "food":           ["food", "dining", "swiggy", "zomato", "restaurant", "bigbasket",
+                       "instamart", "dominos", "kfc", "blinkit", "uber eats"],
+    "shopping":       ["shopping", "amazon", "flipkart", "myntra", "ajio", "meesho", "nykaa"],
+    "transport":      ["transport", "uber", "ola", "rapido", "metro", "petrol", "fuel", "cab"],
+    "entertainment":  ["entertainment", "netflix", "spotify", "hotstar", "prime", "bookmyshow"],
+    "utilities":      ["utilities", "electricity", "airtel", "jio", "broadband", "recharge", "bill"],
+    "healthcare":     ["healthcare", "apollo", "medplus", "1mg", "pharmacy", "medicine", "doctor"],
+    "subscriptions":  ["netflix", "spotify", "prime", "hotstar", "subscription", "recurring"],
+    "credit":         ["credit card", "hdfc", "icici", "sbi", "emi", "loan"],
+}
+
+MONTH_MAP = {
+    "jan": 1, "january": 1,
+    "feb": 2, "february": 2,
+    "mar": 3, "march": 3,
+    "apr": 4, "april": 4,
+    "may": 5,
+    "jun": 6, "june": 6,
+    "jul": 7, "july": 7,
+    "aug": 8, "august": 8,
+    "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10,
+    "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
+}
+
+
+def detect_intent(query: str) -> dict:
+    """
+    Extract intent signals from the user query.
+    Returns dict with: category, month, sort_by, keywords
+    """
+    q = query.lower().strip()
+    intent = {
+        "category":  None,   # e.g. "food", "shopping"
+        "month":     None,   # integer 1-12
+        "sort_by":   None,   # "amount_desc" | "amount_asc"
+        "keywords":  [],     # raw keywords for FAISS
+    }
+
+    # ── Detect category ───────────────────────────────────────────────────────
+    for cat, synonyms in CATEGORY_SYNONYMS.items():
+        if any(syn in q for syn in synonyms):
+            intent["category"] = cat
+            break
+
+    # ── Detect month ──────────────────────────────────────────────────────────
+    for month_str, month_num in MONTH_MAP.items():
+        if month_str in q:
+            intent["month"] = month_num
+            break
+
+    # ── Detect sort intent ────────────────────────────────────────────────────
+    if any(w in q for w in ["biggest", "largest", "most expensive", "highest", "top"]):
+        intent["sort_by"] = "amount_desc"
+    elif any(w in q for w in ["smallest", "cheapest", "lowest", "least"]):
+        intent["sort_by"] = "amount_asc"
+
+    return intent
+
+
+# ─────────────────────────────────────────────
+#  Pre-filter df based on intent (BEFORE FAISS)
+# ─────────────────────────────────────────────
+
+def prefilter_df(df: pd.DataFrame, intent: dict) -> tuple:
+    """
+    Apply rule-based filters to df BEFORE embedding search.
+    Returns (filtered_df, filter_description).
+    Falls back to full df if filter returns empty.
+    """
+    filtered = df.copy()
+    desc_parts = []
+
+    # ── Fix date column ───────────────────────────────────────────────────────
+    if "Date" in filtered.columns:
+        filtered["_date_parsed"] = pd.to_datetime(
+            filtered["Date"], dayfirst=True, errors="coerce"
+        )
+
+    # ── Month filter ──────────────────────────────────────────────────────────
+    if intent["month"] and "_date_parsed" in filtered.columns:
+        month_filtered = filtered[
+            filtered["_date_parsed"].dt.month == intent["month"]
+        ]
+        if not month_filtered.empty:
+            filtered = month_filtered
+            month_name = list(MONTH_MAP.keys())[
+                list(MONTH_MAP.values()).index(intent["month"])
+            ].capitalize()
+            desc_parts.append(f"in {month_name}")
+
+    # ── Category filter ───────────────────────────────────────────────────────
+    if intent["category"] and "Category" in filtered.columns:
+        synonyms = CATEGORY_SYNONYMS.get(intent["category"], [])
+        # Match on Category column OR Description column
+        cat_mask  = filtered["Category"].str.lower().str.contains(
+            intent["category"], na=False
+        )
+        desc_mask = filtered["Description"].str.lower().apply(
+            lambda x: any(s in x for s in synonyms)
+        )
+        cat_filtered = filtered[cat_mask | desc_mask]
+        if not cat_filtered.empty:
+            filtered = cat_filtered
+            desc_parts.append(f"in {intent['category'].replace('_', ' ').title()}")
+
+    # ── Sort ──────────────────────────────────────────────────────────────────
+    if intent["sort_by"] == "amount_desc":
+        filtered = filtered.sort_values("Amount", ascending=False)
+        desc_parts.append("sorted by highest amount")
+    elif intent["sort_by"] == "amount_asc":
+        filtered = filtered.sort_values("Amount", ascending=True)
+        desc_parts.append("sorted by lowest amount")
+
+    # ── Fallback to full df if filter returned nothing ─────────────────────────
+    used_fallback = False
+    if filtered.empty or len(filtered) == 0:
+        filtered = df.copy()
+        used_fallback = True
+        desc_parts = ["all transactions (no matching filter found)"]
+
+    filter_desc = ", ".join(desc_parts) if desc_parts else "all transactions"
+
+    # Drop helper column
+    if "_date_parsed" in filtered.columns:
+        filtered = filtered.drop(columns=["_date_parsed"])
+
+    return filtered, filter_desc, used_fallback
+
+
+# ─────────────────────────────────────────────
+#  FAISS search on filtered subset
+# ─────────────────────────────────────────────
+
+def faiss_search(query: str, df: pd.DataFrame, n_results: int = 10) -> list:
+    """
+    Build a mini FAISS index from the (already filtered) df,
+    search for query, return list of matching metadata dicts.
+    """
+    if df.empty:
+        return []
+
+    import faiss
+
+    # Build documents
+    docs = []
+    metas = []
+    for _, row in df.iterrows():
+        text = (
+            f"{row.get('Date', '')} | {row.get('Description', '')} | "
+            f"₹{float(row.get('Amount', 0)):,.0f} | {row.get('Category', 'Other')}"
+        )
+        docs.append(text)
+        metas.append({
+            "date":        str(row.get("Date", "")),
+            "description": str(row.get("Description", "")),
+            "amount":      float(row.get("Amount", 0)),
+            "category":    str(row.get("Category", "Other")),
+        })
+
+    model      = _get_model()
+    embeddings = model.encode(docs, show_progress_bar=False, batch_size=64)
+    embeddings = np.array(embeddings, dtype="float32")
+    faiss.normalize_L2(embeddings)
+
+    # Build index
+    dim   = embeddings.shape[1]
+    index = faiss.IndexFlatIP(dim)
+    index.add(embeddings)
+
+    # Search
+    query_vec = model.encode([query], show_progress_bar=False)
+    query_vec = np.array(query_vec, dtype="float32")
+    faiss.normalize_L2(query_vec)
+
+    k = min(n_results, len(docs))
+    _, indices = index.search(query_vec, k)
+
+    # Deduplicate by description+amount
+    seen    = set()
+    results = []
+    for idx in indices[0]:
+        if idx < 0:
+            continue
+        m   = metas[idx]
+        key = (m["description"], m["amount"])
+        if key not in seen:
+            seen.add(key)
+            results.append(m)
+
+    return results
+
+
+# ─────────────────────────────────────────────
+#  Build context string for LLM
+# ─────────────────────────────────────────────
+
+def build_rag_context(
+    results: list,
+    filter_desc: str,
+    monthly_income: float,
+    total_transactions: int,
+) -> str:
+    """
+    Format retrieved transactions into a clean context string.
+    Includes explainability metadata.
+    """
+    if not results:
+        return ""
+
+    total_amount = sum(r["amount"] for r in results)
+    n            = len(results)
+
+    # Summary line (explainability)
+    context_lines = [
+        f"Retrieved {n} transactions ({filter_desc}).",
+        f"Total amount: ₹{total_amount:,.0f}",
+        f"User monthly income: ₹{monthly_income:,.0f}",
+        "",
+        "Transaction details:",
+    ]
+
+    for r in results:
+        context_lines.append(
+            f"  • {r['date']} | {r['description']} | ₹{r['amount']:,.0f} | {r['category']}"
+        )
+
+    return "\n".join(context_lines)
+
+
+# ─────────────────────────────────────────────
+#  Public: index_transactions (no-op for FAISS)
 # ─────────────────────────────────────────────
 
 def index_transactions(df: pd.DataFrame) -> bool:
     """
-    Build a FAISS index from transactions.
-    Only re-indexes if the DataFrame has changed.
-
-    Returns True if indexed successfully, False if FAISS unavailable.
+    For FAISS we build the index on-demand per query (filtered subset).
+    This function just validates availability.
     """
-    global _faiss_index, _documents, _metadatas, _index_hash
-
-    if not _faiss_available():
-        return False
-
-    import faiss
-
-    # Skip if already indexed with same data
-    df_hash = hashlib.md5(pd.util.hash_pandas_object(df).values).hexdigest()
-    if df_hash == _index_hash:
-        return True
-
-    # ── Build text documents ──────────────────────────────────────────────────
-    documents = []
-    metadatas = []
-
-    for _, row in df.iterrows():
-        date   = str(row.get("Date", ""))
-        desc   = str(row.get("Description", ""))
-        amount = float(row.get("Amount", 0))
-        cat    = str(row.get("Category", "Other"))
-
-        # Rich text format for better semantic search
-        text = f"{date} | {desc} | ₹{amount:,.0f} | {cat}"
-        documents.append(text)
-        metadatas.append({
-            "date":        date,
-            "description": desc,
-            "amount":      amount,
-            "category":    cat,
-        })
-
-    # ── Generate embeddings ───────────────────────────────────────────────────
-    model      = _get_model()
-    embeddings = model.encode(documents, show_progress_bar=False, batch_size=64)
-    embeddings = np.array(embeddings, dtype="float32")
-
-    # Normalize for cosine similarity
-    faiss.normalize_L2(embeddings)
-
-    # ── Build FAISS index ─────────────────────────────────────────────────────
-    dim   = embeddings.shape[1]
-    index = faiss.IndexFlatIP(dim)   # Inner Product = cosine on normalized vectors
-    index.add(embeddings)
-
-    _faiss_index = index
-    _documents   = documents
-    _metadatas   = metadatas
-    _index_hash  = df_hash
-
-    return True
+    return _faiss_available()
 
 
 # ─────────────────────────────────────────────
-#  Retrieve relevant transactions
+#  Public: retrieve_relevant_context
 # ─────────────────────────────────────────────
 
 def retrieve_relevant_context(query: str, n_results: int = 12) -> str:
-    """
-    Encode the query, search FAISS, return top matching transactions as text.
-    Returns empty string if FAISS not available or index empty.
-    """
-    if not _faiss_available() or _faiss_index is None or not _documents:
-        return ""
-
-    try:
-        import faiss
-
-        model        = _get_model()
-        query_vec    = model.encode([query], show_progress_bar=False)
-        query_vec    = np.array(query_vec, dtype="float32")
-        faiss.normalize_L2(query_vec)
-
-        k       = min(n_results, len(_documents))
-        scores, indices = _faiss_index.search(query_vec, k)
-
-        lines = ["Relevant transactions for your question:"]
-        for idx, score in zip(indices[0], scores[0]):
-            if idx < 0:
-                continue
-            m = _metadatas[idx]
-            lines.append(
-                f"  • {m['date']} | {m['description']} | "
-                f"₹{m['amount']:,.0f} | {m['category']}"
-            )
-
-        return "\n".join(lines)
-
-    except Exception as e:
-        print(f"[FAISS] Retrieval error: {e}")
-        return ""
+    """Legacy interface — used by app.py if called directly."""
+    return ""   # handled inside rag_chat now
 
 
 # ─────────────────────────────────────────────
-#  RAG-powered Chat (same signature as before)
+#  Main: rag_chat
 # ─────────────────────────────────────────────
 
 def rag_chat(
@@ -173,39 +320,53 @@ def rag_chat(
     financial_context: str,
 ) -> tuple:
     """
-    Answer a finance question using FAISS RAG.
-    Falls back to regular chat if FAISS is unavailable.
+    Hybrid RAG chat:
+      1. Detect intent → 2. Pre-filter df → 3. FAISS search →
+      4. Build clean context → 5. LLM response
 
     Returns: (reply, updated_chat_history, used_rag: bool)
     """
     from ai.gemini_ai import chat_with_finances, _call_llm_chat
 
-    # Try to index and retrieve
-    indexed   = index_transactions(df)
-    retrieved = retrieve_relevant_context(user_message) if indexed else ""
+    if not _faiss_available() or df is None or df.empty:
+        # Fallback to regular chat
+        reply, updated = chat_with_finances(user_message, chat_history, financial_context)
+        return reply, updated, False
 
-    if indexed and retrieved:
-        total_spent = df["Amount"].sum()
-        savings     = monthly_income - total_spent
+    try:
+        # ── Step 1: Detect intent ─────────────────────────────────────────────
+        intent = detect_intent(user_message)
 
-        rag_context = (
-            f"USER FINANCIAL SUMMARY:\n"
-            f"Monthly Income : ₹{monthly_income:,.0f}\n"
-            f"Total Spent    : ₹{total_spent:,.0f}\n"
-            f"Savings        : ₹{savings:,.0f}\n"
-            f"Transactions   : {len(df)}\n\n"
-            f"{retrieved}"
+        # ── Step 2: Pre-filter df ─────────────────────────────────────────────
+        filtered_df, filter_desc, used_fallback = prefilter_df(df, intent)
+
+        # ── Step 3: FAISS search on filtered subset ───────────────────────────
+        results = faiss_search(user_message, filtered_df, n_results=12)
+
+        if not results:
+            reply, updated = chat_with_finances(user_message, chat_history, financial_context)
+            return reply, updated, False
+
+        # ── Step 4: Build clean context ───────────────────────────────────────
+        rag_context = build_rag_context(
+            results, filter_desc, monthly_income, len(df)
         )
 
-        system_prompt = (
-            "You are Finora, a smart AI financial advisor for Indian users.\n"
-            "Answer the user's question using ONLY the transaction data provided below.\n"
-            "Be specific — reference exact amounts, dates, merchant names.\n"
-            "Keep answers concise (under 150 words). Use ₹ symbols.\n\n"
-            f"{rag_context}\n---"
-        )
+        # ── Step 5: LLM prompt ────────────────────────────────────────────────
+        system_prompt = f"""You are Finora, a smart AI financial advisor for Indian users.
+Answer the user's question using ONLY the transaction data below.
 
-        # Build OpenAI-style message list
+RULES:
+- Be specific — use exact ₹ amounts and dates from the data
+- Always mention: how many transactions, category (if relevant), time period (if relevant)
+- Example good answer: "Your total food spending in December is ₹6,620 across 8 transactions."
+- Keep answer under 120 words
+- Use ₹ symbols
+- Do NOT list all transactions unless asked
+
+{rag_context}
+---"""
+
         messages = [{"role": "system", "content": system_prompt}]
         for msg in chat_history:
             role = "assistant" if msg["role"] == "model" else "user"
@@ -215,14 +376,12 @@ def rag_chat(
             messages.append({"role": role, "content": text})
         messages.append({"role": "user", "content": user_message})
 
-        try:
-            reply = _call_llm_chat(messages, max_tokens=400)
-            chat_history.append({"role": "user",  "parts": [user_message]})
-            chat_history.append({"role": "model", "parts": [reply]})
-            return reply, chat_history, True
-        except Exception as e:
-            print(f"[RAG] LLM error: {e}")
+        reply = _call_llm_chat(messages, max_tokens=300)
+        chat_history.append({"role": "user",  "parts": [user_message]})
+        chat_history.append({"role": "model", "parts": [reply]})
+        return reply, chat_history, True
 
-    # Fallback — regular context injection
-    reply, updated = chat_with_finances(user_message, chat_history, financial_context)
-    return reply, updated, False
+    except Exception as e:
+        print(f"[RAG] Error: {e}")
+        reply, updated = chat_with_finances(user_message, chat_history, financial_context)
+        return reply, updated, False

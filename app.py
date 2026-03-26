@@ -1144,12 +1144,12 @@ elif active_tab == "💬 Chat":
     if rag_ready:
         st.markdown(
             '<div class="success-card" style="padding:.6rem 1rem;margin-bottom:.8rem;">'
-            '🧠 <strong>RAG enabled</strong> — Finora retrieves the most relevant transactions '
-            'for each question instead of sending everything at once.</div>',
+            '🧠 <strong>Hybrid RAG enabled</strong> — Finora filters by category/month first, '
+            'then uses FAISS to find the most relevant transactions for your question.</div>',
             unsafe_allow_html=True
         )
     else:
-        st.caption("💡 Install `chromadb` and `sentence-transformers` to enable smarter RAG-based chat.")
+        st.caption("💡 Install `faiss-cpu` and `sentence-transformers` to enable smarter RAG-based chat.")
 
     suggestions = [
         "Am I overspending on food?", "Where can I cut costs?", "How much should I save?",
