@@ -318,13 +318,26 @@ if active_tab == "🏠 Dashboard":
     # ── 2: Financial Snapshot ─────────────────────────────────────────────────
     st.markdown('<div class="section-title">📸 Financial Snapshot</div>', unsafe_allow_html=True)
 
+    # Show data period label for explainability
+    data_period = savings_res.get("data_period", "")
+    num_months  = savings_res.get("num_months", 1)
+    total_raw   = savings_res.get("total_raw_spend", savings_res["total_spent"])
+    if data_period:
+        st.markdown(
+            f'<div style="font-size:.85rem;color:#9ca3af;margin-bottom:.75rem;">'
+            f'📅 Analysis based on <strong style="color:#a78bfa;">{data_period}</strong> of transaction data. '
+            f'All values shown are <strong>monthly averages</strong>.</div>',
+            unsafe_allow_html=True
+        )
+
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Monthly Income",  format_inr(monthly_income))
-    c2.metric("Total Spent",     format_inr(savings_res["total_spent"]))
-    c3.metric("Savings",         format_inr(max(savings_res["savings"], 0)))
-    c4.metric("Savings Rate",    f"{savings_res['savings_rate']:.1f}%",
+    c1.metric("Monthly Income",    format_inr(monthly_income))
+    c2.metric("Avg Monthly Spend", format_inr(savings_res["monthly_spend"]),
+              help=f"Total ₹{total_raw:,.0f} ÷ {num_months} months")
+    c3.metric("Monthly Savings",   format_inr(max(savings_res["savings"], 0)))
+    c4.metric("Savings Rate",      f"{savings_res['savings_rate']:.1f}%",
               delta="Good ✅" if savings_res["savings_rate"] >= 20 else "Low ⚠️")
-    c5.metric("Health Score",    f"{score_res['score']}/100",
+    c5.metric("Health Score",      f"{score_res['score']}/100",
               delta=score_res["grade"])
 
     score_color = score_res["grade_color"]
@@ -336,6 +349,7 @@ if active_tab == "🏠 Dashboard":
         </div>
         <div style="font-size:.8rem;color:#9ca3af;margin-top:.3rem;">
             {score_res['grade_emoji']} {score_res['grade']} Financial Health
+            &nbsp;·&nbsp; Total spend across all months: {format_inr(total_raw)}
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -794,13 +808,23 @@ elif active_tab == "💰 Savings Analysis":
 
     result = analyze_savings_behavior(cat_df, monthly_income)
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total Spent",   format_inr(result["total_spent"]))
-    c2.metric("Savings",       format_inr(result["savings"]))
-    c3.metric("Savings Rate",  f"{result['savings_rate']:.1f}%",
+    # Show data period
+    if result.get("data_period"):
+        st.markdown(
+            f'<div style="font-size:.85rem;color:#9ca3af;margin-bottom:.75rem;">'
+            f'📅 Data: <strong style="color:#a78bfa;">{result["data_period"]}</strong> · '
+            f'All values are <strong>monthly averages</strong>.</div>',
+            unsafe_allow_html=True
+        )
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Avg Monthly Spend", format_inr(result["monthly_spend"]))
+    c2.metric("Total Spend",       format_inr(result["total_raw_spend"]),
+              help=f"Across {result['num_months']} months")
+    c3.metric("Monthly Savings",   format_inr(result["savings"]))
+    c4.metric("Savings Rate",      f"{result['savings_rate']:.1f}%",
               delta="Good ✅" if result["status"] == "good" else "Needs work ⚠️")
 
-    # Savings rate progress bar
     st.markdown("<br>", unsafe_allow_html=True)
     rate = max(min(result["savings_rate"] / 100, 1.0), 0.0)
     st.progress(rate, text=f"Savings Rate: {result['savings_rate']:.1f}% (Target: 30%)")

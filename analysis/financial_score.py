@@ -1,6 +1,9 @@
 """
 financial_score.py — Calculate a Financial Health Score (0–100).
 
+FIXED: Uses monthly normalized spend instead of raw total spend.
+This ensures correct scoring when data spans multiple months.
+
 Factors:
   1. Savings Rate          (max 30 pts)
   2. Spending Stability    (max 20 pts)
@@ -12,36 +15,26 @@ Factors:
 import pandas as pd
 from analysis.anomaly_detection import detect_anomalies
 from analysis.subscriptions import detect_subscriptions
+from utils.normalizer import normalize_to_monthly
 
 
 def calculate_financial_score(df: pd.DataFrame, monthly_income: float) -> dict:
     """
     Calculate a Financial Health Score from 0–100.
-
-    Args:
-        df:             Categorized transactions DataFrame.
-        monthly_income: User's monthly income in ₹.
-
-    Returns:
-        {
-          "score":          int (0–100),
-          "grade":          str ("Excellent" / "Good" / "Needs Improvement" / "Risky"),
-          "grade_emoji":    str,
-          "score_breakdown": dict of factor → points earned,
-          "max_breakdown":   dict of factor → max points,
-          "explanation":    str,
-          "tips":           list of str
-        }
+    Uses monthly normalized spend — correct for multi-month data.
     """
-    total_spent = df["Amount"].sum() if not df.empty else 0
-    savings      = monthly_income - total_spent
-    breakdown    = {}
-    max_points   = {}
-    tips         = []
+    # ── Normalize spend to monthly (KEY FIX) ─────────────────────────────────
+    norm         = normalize_to_monthly(df, monthly_income)
+    monthly_spend = norm["monthly_spend"]
+    savings       = norm["monthly_savings"]
+    savings_rate  = norm["savings_rate"]
+
+    breakdown  = {}
+    max_points = {}
+    tips       = []
 
     # ── Factor 1: Savings Rate (30 pts) ──────────────────────────────────────
     max_points["Savings Rate"] = 30
-    savings_rate = (savings / monthly_income * 100) if monthly_income > 0 else 0
 
     if savings_rate >= 30:
         s1 = 30
