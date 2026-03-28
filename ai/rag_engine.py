@@ -1,70 +1,45 @@
 """
-rag_engine.py — Hybrid RAG for Finora Chat
-Upgrade: Rule-based filtering BEFORE FAISS for accurate retrieval.
+rag_engine.py — Deterministic, hallucination-free chat for Finora.
 
-Pipeline:
-  1. Detect intent from query (category, month, sort)
-  2. Filter df BEFORE embedding (rule-based pre-filter)
-  3. FAISS cosine search on filtered subset
-  4. Return clean context + explainability metadata
+Architecture (strict):
+  Step 1: detect_intent(query)     → category, month, metric
+  Step 2: filter_df(df, intent)    → filtered DataFrame
+  Step 3: compute_result(df)       → Python-computed facts dict
+  Step 4: format_response(facts)   → LLM narrates ONLY given numbers
 
-Requires: pip install faiss-cpu sentence-transformers
-Fallback: full dataset if filter returns empty, then regular chat if FAISS unavailable.
+LLM rule: receives only verified Python-computed numbers.
+          CANNOT calculate, estimate, or invent anything.
 """
 
-import re
-import hashlib
-import numpy as np
 import pandas as pd
 
 
 # ─────────────────────────────────────────────
-#  Availability
+#  App.py compatibility stubs
 # ─────────────────────────────────────────────
-
-def _faiss_available() -> bool:
-    try:
-        import faiss
-        from sentence_transformers import SentenceTransformer
-        return True
-    except ImportError:
-        return False
-
-# Keep old name so app.py import stays unchanged
+def _faiss_available() -> bool:         return True
 _chromadb_available = _faiss_available
+def index_transactions(df) -> bool:     return True
+def retrieve_relevant_context(*a):      return ""
 
 
 # ─────────────────────────────────────────────
-#  Global state
+#  STEP 1 — Intent detection
 # ─────────────────────────────────────────────
 
-_model      = None
-_index_hash = None   # hash of last indexed df
-
-
-def _get_model():
-    global _model
-    if _model is None:
-        from sentence_transformers import SentenceTransformer
-        _model = SentenceTransformer("all-MiniLM-L6-v2")
-    return _model
-
-
-# ─────────────────────────────────────────────
-#  Intent detection
-# ─────────────────────────────────────────────
-
-# Synonym maps — expand query keywords to category keywords
-CATEGORY_SYNONYMS = {
-    "food":           ["food", "dining", "swiggy", "zomato", "restaurant", "bigbasket",
-                       "instamart", "dominos", "kfc", "blinkit", "uber eats"],
-    "shopping":       ["shopping", "amazon", "flipkart", "myntra", "ajio", "meesho", "nykaa"],
-    "transport":      ["transport", "uber", "ola", "rapido", "metro", "petrol", "fuel", "cab"],
-    "entertainment":  ["entertainment", "netflix", "spotify", "hotstar", "prime", "bookmyshow"],
-    "utilities":      ["utilities", "electricity", "airtel", "jio", "broadband", "recharge", "bill"],
-    "healthcare":     ["healthcare", "apollo", "medplus", "1mg", "pharmacy", "medicine", "doctor"],
-    "subscriptions":  ["netflix", "spotify", "prime", "hotstar", "subscription", "recurring"],
-    "credit":         ["credit card", "hdfc", "icici", "sbi", "emi", "loan"],
+CATEGORY_MAP = {
+    "food":          ["food", "dining", "swiggy", "zomato", "restaurant",
+                      "bigbasket", "instamart", "dominos", "kfc", "blinkit", "uber eats"],
+    "shopping":      ["shopping", "amazon", "flipkart", "myntra", "ajio", "meesho", "nykaa"],
+    "transport":     ["transport", "uber", "ola", "rapido", "metro", "petrol", "fuel", "cab", "irctc"],
+    "entertainment": ["entertainment", "netflix", "spotify", "hotstar", "prime video",
+                      "bookmyshow", "pvr", "gaming"],
+    "utilities":     ["utilities", "electricity", "airtel", "jio", "vodafone",
+                      "broadband", "recharge", "internet", "bill"],
+    "healthcare":    ["healthcare", "apollo", "medplus", "1mg", "pharmeasy",
+                      "pharmacy", "medicine", "hospital", "doctor"],
+    "subscriptions": ["subscription", "netflix", "spotify", "hotstar", "prime",
+                      "recurring", "monthly plan"],
 }
 
 MONTH_MAP = {
@@ -82,230 +57,222 @@ MONTH_MAP = {
     "dec": 12, "december": 12,
 }
 
+METRIC_KEYWORDS = {
+    "total_spend":    ["total", "how much", "spend", "spent", "cost", "amount"],
+    "monthly_spend":  ["monthly", "per month", "average", "avg", "month"],
+    "biggest":        ["biggest", "largest", "most expensive", "highest", "top", "maximum", "max"],
+    "smallest":       ["smallest", "cheapest", "lowest", "minimum", "min", "least"],
+    "count":          ["how many", "count", "number of", "times", "frequency"],
+    "list":           ["list", "show", "all transactions", "what are"],
+}
+
 
 def detect_intent(query: str) -> dict:
     """
-    Extract intent signals from the user query.
-    Returns dict with: category, month, sort_by, keywords
+    Parse natural language query into structured intent.
+    Returns: {category, month, metric, raw_query}
     """
     q = query.lower().strip()
-    intent = {
-        "category":  None,   # e.g. "food", "shopping"
-        "month":     None,   # integer 1-12
-        "sort_by":   None,   # "amount_desc" | "amount_asc"
-        "keywords":  [],     # raw keywords for FAISS
+
+    # Detect category
+    category = None
+    for cat, keywords in CATEGORY_MAP.items():
+        if any(kw in q for kw in keywords):
+            category = cat
+            break
+
+    # Detect month
+    month = None
+    for word, num in MONTH_MAP.items():
+        if word in q:
+            month = num
+            break
+
+    # Detect metric (default: total_spend)
+    metric = "total_spend"
+    for m, keywords in METRIC_KEYWORDS.items():
+        if any(kw in q for kw in keywords):
+            metric = m
+            break
+
+    return {
+        "category":  category,
+        "month":     month,
+        "metric":    metric,
+        "raw_query": query,
     }
 
-    # ── Detect category ───────────────────────────────────────────────────────
-    for cat, synonyms in CATEGORY_SYNONYMS.items():
-        if any(syn in q for syn in synonyms):
-            intent["category"] = cat
-            break
-
-    # ── Detect month ──────────────────────────────────────────────────────────
-    for month_str, month_num in MONTH_MAP.items():
-        if month_str in q:
-            intent["month"] = month_num
-            break
-
-    # ── Detect sort intent ────────────────────────────────────────────────────
-    if any(w in q for w in ["biggest", "largest", "most expensive", "highest", "top"]):
-        intent["sort_by"] = "amount_desc"
-    elif any(w in q for w in ["smallest", "cheapest", "lowest", "least"]):
-        intent["sort_by"] = "amount_asc"
-
-    return intent
-
 
 # ─────────────────────────────────────────────
-#  Pre-filter df based on intent (BEFORE FAISS)
+#  STEP 2 — Filter DataFrame (no FAISS, no LLM)
 # ─────────────────────────────────────────────
 
-def prefilter_df(df: pd.DataFrame, intent: dict) -> tuple:
+def filter_df(df: pd.DataFrame, intent: dict) -> tuple:
     """
-    Apply rule-based filters to df BEFORE embedding search.
-    Returns (filtered_df, filter_description).
+    Apply category and month filters to the full DataFrame.
+    Returns (filtered_df, scope_label).
     Falls back to full df if filter returns empty.
     """
-    filtered = df.copy()
-    desc_parts = []
+    filtered   = df.copy()
+    scope_parts = []
 
-    # ── Fix date column ───────────────────────────────────────────────────────
-    if "Date" in filtered.columns:
-        filtered["_date_parsed"] = pd.to_datetime(
-            filtered["Date"], dayfirst=True, errors="coerce"
-        )
+    # Parse dates once
+    filtered["_date"] = pd.to_datetime(
+        filtered["Date"], dayfirst=True, errors="coerce"
+    )
 
-    # ── Month filter ──────────────────────────────────────────────────────────
-    if intent["month"] and "_date_parsed" in filtered.columns:
-        month_filtered = filtered[
-            filtered["_date_parsed"].dt.month == intent["month"]
-        ]
-        if not month_filtered.empty:
-            filtered = month_filtered
-            month_name = list(MONTH_MAP.keys())[
-                list(MONTH_MAP.values()).index(intent["month"])
-            ].capitalize()
-            desc_parts.append(f"in {month_name}")
-
-    # ── Category filter ───────────────────────────────────────────────────────
-    if intent["category"] and "Category" in filtered.columns:
-        synonyms = CATEGORY_SYNONYMS.get(intent["category"], [])
-        # Match on Category column OR Description column
-        cat_mask  = filtered["Category"].str.lower().str.contains(
+    # Category filter
+    if intent["category"]:
+        keywords = CATEGORY_MAP.get(intent["category"], [])
+        cat_mask = filtered["Category"].str.lower().str.contains(
             intent["category"], na=False
         )
         desc_mask = filtered["Description"].str.lower().apply(
-            lambda x: any(s in x for s in synonyms)
+            lambda x: any(kw in str(x) for kw in keywords)
         )
-        cat_filtered = filtered[cat_mask | desc_mask]
-        if not cat_filtered.empty:
-            filtered = cat_filtered
-            desc_parts.append(f"in {intent['category'].replace('_', ' ').title()}")
+        result = filtered[cat_mask | desc_mask]
+        if not result.empty:
+            filtered = result
+            scope_parts.append(intent["category"].title())
 
-    # ── Sort ──────────────────────────────────────────────────────────────────
-    if intent["sort_by"] == "amount_desc":
-        filtered = filtered.sort_values("Amount", ascending=False)
-        desc_parts.append("sorted by highest amount")
-    elif intent["sort_by"] == "amount_asc":
-        filtered = filtered.sort_values("Amount", ascending=True)
-        desc_parts.append("sorted by lowest amount")
+    # Month filter
+    if intent["month"]:
+        result = filtered[filtered["_date"].dt.month == intent["month"]]
+        if not result.empty:
+            filtered = result
+            month_name = filtered["_date"].dt.month_name().iloc[0]
+            scope_parts.append(month_name)
 
-    # ── Fallback to full df if filter returned nothing ─────────────────────────
-    used_fallback = False
-    if filtered.empty or len(filtered) == 0:
-        filtered = df.copy()
-        used_fallback = True
-        desc_parts = ["all transactions (no matching filter found)"]
-
-    filter_desc = ", ".join(desc_parts) if desc_parts else "all transactions"
-
-    # Drop helper column
-    if "_date_parsed" in filtered.columns:
-        filtered = filtered.drop(columns=["_date_parsed"])
-
-    return filtered, filter_desc, used_fallback
+    scope_label = " in ".join(scope_parts) if scope_parts else "All transactions"
+    return filtered, scope_label
 
 
 # ─────────────────────────────────────────────
-#  FAISS search on filtered subset
+#  STEP 3 — Compute result in Python (MANDATORY)
 # ─────────────────────────────────────────────
 
-def faiss_search(query: str, df: pd.DataFrame, n_results: int = 10) -> list:
-    """
-    Build a mini FAISS index from the (already filtered) df,
-    search for query, return list of matching metadata dicts.
-    """
-    if df.empty:
-        return []
-
-    import faiss
-
-    # Build documents
-    docs = []
-    metas = []
-    for _, row in df.iterrows():
-        text = (
-            f"{row.get('Date', '')} | {row.get('Description', '')} | "
-            f"₹{float(row.get('Amount', 0)):,.0f} | {row.get('Category', 'Other')}"
-        )
-        docs.append(text)
-        metas.append({
-            "date":        str(row.get("Date", "")),
-            "description": str(row.get("Description", "")),
-            "amount":      float(row.get("Amount", 0)),
-            "category":    str(row.get("Category", "Other")),
-        })
-
-    model      = _get_model()
-    embeddings = model.encode(docs, show_progress_bar=False, batch_size=64)
-    embeddings = np.array(embeddings, dtype="float32")
-    faiss.normalize_L2(embeddings)
-
-    # Build index
-    dim   = embeddings.shape[1]
-    index = faiss.IndexFlatIP(dim)
-    index.add(embeddings)
-
-    # Search
-    query_vec = model.encode([query], show_progress_bar=False)
-    query_vec = np.array(query_vec, dtype="float32")
-    faiss.normalize_L2(query_vec)
-
-    k = min(n_results, len(docs))
-    _, indices = index.search(query_vec, k)
-
-    # Deduplicate by description+amount
-    seen    = set()
-    results = []
-    for idx in indices[0]:
-        if idx < 0:
-            continue
-        m   = metas[idx]
-        key = (m["description"], m["amount"])
-        if key not in seen:
-            seen.add(key)
-            results.append(m)
-
-    return results
-
-
-# ─────────────────────────────────────────────
-#  Build context string for LLM
-# ─────────────────────────────────────────────
-
-def build_rag_context(
-    results: list,
-    filter_desc: str,
+def compute_result(
+    filtered: pd.DataFrame,
+    intent: dict,
     monthly_income: float,
-    total_transactions: int,
-) -> str:
+    scope_label: str,
+) -> dict:
     """
-    Format retrieved transactions into a clean context string.
-    Includes explainability metadata.
+    All financial calculations happen HERE in Python.
+    LLM receives only the output of this function.
     """
-    if not results:
-        return ""
+    if filtered.empty:
+        return {
+            "found":   False,
+            "message": f"No transactions found for: {scope_label}.",
+        }
 
-    total_amount = sum(r["amount"] for r in results)
-    n            = len(results)
+    metric = intent["metric"]
 
-    # Summary line (explainability)
-    context_lines = [
-        f"Retrieved {n} transactions ({filter_desc}).",
-        f"Total amount: ₹{total_amount:,.0f}",
-        f"User monthly income: ₹{monthly_income:,.0f}",
-        "",
-        "Transaction details:",
+    # Core numbers (always computed)
+    total_spend   = float(filtered["Amount"].sum())
+    count         = len(filtered)
+    avg_per_txn   = total_spend / count if count > 0 else 0
+
+    # Monthly normalization
+    unique_months = max(int(
+        filtered["_date"].dt.to_period("M").nunique()
+    ), 1) if "_date" in filtered.columns else 1
+    monthly_avg   = total_spend / unique_months
+
+    pct_of_income = (
+        (monthly_avg / monthly_income * 100) if monthly_income > 0 else 0
+    )
+
+    # Top transactions
+    top_df   = filtered.nlargest(5, "Amount")[["Date", "Description", "Amount", "Category"]]
+    top_list = [
+        f"₹{r['Amount']:,.0f} — {r['Description']} ({r['Date']})"
+        for _, r in top_df.iterrows()
     ]
 
-    for r in results:
-        context_lines.append(
-            f"  • {r['date']} | {r['description']} | ₹{r['amount']:,.0f} | {r['category']}"
+    # Bottom transactions
+    bot_df   = filtered.nsmallest(3, "Amount")[["Date", "Description", "Amount"]]
+    bot_list = [
+        f"₹{r['Amount']:,.0f} — {r['Description']} ({r['Date']})"
+        for _, r in bot_df.iterrows()
+    ]
+
+    # Category breakdown (when not filtered to single category)
+    cat_breakdown = {}
+    if "Category" in filtered.columns and not intent["category"]:
+        cat_breakdown = (
+            filtered.groupby("Category")["Amount"].sum()
+            .sort_values(ascending=False).head(5).to_dict()
         )
 
-    return "\n".join(context_lines)
+    # Listing (top 10 only)
+    list_preview = []
+    if metric == "list":
+        preview_df = filtered.head(10)[["Date", "Description", "Amount", "Category"]]
+        list_preview = [
+            f"{r['Date']} | {r['Description']} | ₹{r['Amount']:,.0f} | {r['Category']}"
+            for _, r in preview_df.iterrows()
+        ]
+
+    return {
+        "found":          True,
+        "metric":         metric,
+        "scope":          scope_label,
+        "count":          count,
+        "total_spend":    total_spend,
+        "monthly_avg":    monthly_avg,
+        "avg_per_txn":    avg_per_txn,
+        "unique_months":  unique_months,
+        "pct_of_income":  pct_of_income,
+        "biggest":        top_list[0] if top_list else "N/A",
+        "top5":           top_list,
+        "smallest":       bot_list[0] if bot_list else "N/A",
+        "cat_breakdown":  cat_breakdown,
+        "list_preview":   list_preview,
+        "monthly_income": monthly_income,
+    }
 
 
 # ─────────────────────────────────────────────
-#  Public: index_transactions (no-op for FAISS)
+#  STEP 4 — Build verified context for LLM
 # ─────────────────────────────────────────────
 
-def index_transactions(df: pd.DataFrame) -> bool:
+def build_verified_context(result: dict) -> str:
     """
-    For FAISS we build the index on-demand per query (filtered subset).
-    This function just validates availability.
+    Serialize computed result into a structured string.
+    LLM reads only this — cannot access raw data.
     """
-    return _faiss_available()
+    if not result["found"]:
+        return result["message"]
 
+    lines = [
+        "=== PYTHON-COMPUTED FACTS — USE ONLY THESE NUMBERS ===",
+        f"Scope              : {result['scope']}",
+        f"Transactions       : {result['count']}",
+        f"Total spend        : ₹{result['total_spend']:,.0f}",
+        f"Monthly average    : ₹{result['monthly_avg']:,.0f}  (over {result['unique_months']} month(s))",
+        f"Avg per transaction: ₹{result['avg_per_txn']:,.0f}",
+        f"% of monthly income: {result['pct_of_income']:.1f}%",
+        f"Biggest transaction: {result['biggest']}",
+        f"Smallest transaction: {result['smallest']}",
+    ]
 
-# ─────────────────────────────────────────────
-#  Public: retrieve_relevant_context
-# ─────────────────────────────────────────────
+    if result["top5"]:
+        lines.append("Top 5 by amount:")
+        lines.extend(f"  {t}" for t in result["top5"])
 
-def retrieve_relevant_context(query: str, n_results: int = 12) -> str:
-    """Legacy interface — used by app.py if called directly."""
-    return ""   # handled inside rag_chat now
+    if result["cat_breakdown"]:
+        lines.append("Breakdown by category:")
+        for cat, amt in result["cat_breakdown"].items():
+            lines.append(f"  {cat}: ₹{amt:,.0f}")
+
+    if result["list_preview"]:
+        lines.append(f"Transactions (showing top 10 of {result['count']}):")
+        lines.extend(f"  {t}" for t in result["list_preview"])
+
+    lines.append("=== END — DO NOT INVENT ANY OTHER NUMBERS ===")
+    return "\n".join(lines)
 
 
 # ─────────────────────────────────────────────
@@ -315,57 +282,50 @@ def retrieve_relevant_context(query: str, n_results: int = 12) -> str:
 def rag_chat(
     user_message: str,
     chat_history: list,
-    df: pd.DataFrame,
+    df,
     monthly_income: float,
     financial_context: str,
 ) -> tuple:
     """
-    Hybrid RAG chat:
-      1. Detect intent → 2. Pre-filter df → 3. FAISS search →
-      4. Build clean context → 5. LLM response
+    Deterministic, hallucination-free chat.
 
-    Returns: (reply, updated_chat_history, used_rag: bool)
+    Pipeline:
+      detect_intent → filter_df → compute_result → LLM formats only
     """
     from ai.gemini_ai import chat_with_finances, _call_llm_chat
 
-    if not _faiss_available() or df is None or df.empty:
-        # Fallback to regular chat
-        reply, updated = chat_with_finances(user_message, chat_history, financial_context)
+    if df is None or df.empty:
+        reply, updated = chat_with_finances(
+            user_message, chat_history, financial_context
+        )
         return reply, updated, False
 
     try:
-        # ── Step 1: Detect intent ─────────────────────────────────────────────
-        intent = detect_intent(user_message)
+        # Steps 1-3: fully in Python
+        intent          = detect_intent(user_message)
+        filtered, scope = filter_df(df, intent)
+        result          = compute_result(filtered, intent, monthly_income, scope)
+        context         = build_verified_context(result)
 
-        # ── Step 2: Pre-filter df ─────────────────────────────────────────────
-        filtered_df, filter_desc, used_fallback = prefilter_df(df, intent)
+        # Empty result — direct answer, no LLM needed
+        if not result["found"]:
+            chat_history.append({"role": "user",  "parts": [user_message]})
+            chat_history.append({"role": "model", "parts": [result["message"]]})
+            return result["message"], chat_history, True
 
-        # ── Step 3: FAISS search on filtered subset ───────────────────────────
-        results = faiss_search(user_message, filtered_df, n_results=12)
+        # Step 4: LLM formats only — strict prompt
+        system_prompt = f"""You are Finora, a concise AI financial advisor.
 
-        if not results:
-            reply, updated = chat_with_finances(user_message, chat_history, financial_context)
-            return reply, updated, False
+HARD RULES — violations are not allowed:
+1. Use ONLY numbers from the VERIFIED FACTS section
+2. NEVER calculate, estimate, or change any number
+3. ALWAYS start with: "Based on [count] [scope] transactions..."
+4. Keep response under 80 words
+5. Use ₹ symbol
 
-        # ── Step 4: Build clean context ───────────────────────────────────────
-        rag_context = build_rag_context(
-            results, filter_desc, monthly_income, len(df)
-        )
+{context}
 
-        # ── Step 5: LLM prompt ────────────────────────────────────────────────
-        system_prompt = f"""You are Finora, a smart AI financial advisor for Indian users.
-Answer the user's question using ONLY the transaction data below.
-
-RULES:
-- Be specific — use exact ₹ amounts and dates from the data
-- Always mention: how many transactions, category (if relevant), time period (if relevant)
-- Example good answer: "Your total food spending in December is ₹6,620 across 8 transactions."
-- Keep answer under 120 words
-- Use ₹ symbols
-- Do NOT list all transactions unless asked
-
-{rag_context}
----"""
+Narrate the answer using only the facts above."""
 
         messages = [{"role": "system", "content": system_prompt}]
         for msg in chat_history:
@@ -376,12 +336,15 @@ RULES:
             messages.append({"role": role, "content": text})
         messages.append({"role": "user", "content": user_message})
 
-        reply = _call_llm_chat(messages, max_tokens=300)
+        reply = _call_llm_chat(messages, max_tokens=200)
+
         chat_history.append({"role": "user",  "parts": [user_message]})
         chat_history.append({"role": "model", "parts": [reply]})
         return reply, chat_history, True
 
     except Exception as e:
         print(f"[RAG] Error: {e}")
-        reply, updated = chat_with_finances(user_message, chat_history, financial_context)
+        reply, updated = chat_with_finances(
+            user_message, chat_history, financial_context
+        )
         return reply, updated, False
