@@ -75,6 +75,9 @@ METRIC_KEYWORDS = {
     "smallest":       ["smallest", "cheapest", "lowest", "minimum", "min", "least"],
     "count":          ["how many", "count", "number of", "times", "frequency"],
     "list":           ["list", "show", "all transactions", "what are"],
+    "breakdown":      ["elaborate", "breakdown", "break down", "break it down", "detail",
+                       "where did", "where i spent", "what are they", "what r they",
+                       "which ones", "itemize", "each transaction", "show me each"],
 }
 
 # --- UPDATED: Opinion/analysis keywords ---
@@ -93,6 +96,14 @@ def detect_intent(query: str) -> dict:
     """
     q = query.lower().strip()
 
+    # breakdown — check before generic metrics so "elaborate each transaction" isn't
+    # swallowed by "total_spend" matching on "spend" keyword
+    BREAKDOWN_KWS = ["elaborate", "breakdown", "break down", "break it down", "detail",
+                     "where did", "where i spent", "what are they", "what r they",
+                     "which ones", "itemize", "each transaction", "show me each",
+                     "list them", "tell me each", "show each", "what were they",
+                     "what r they", "tell me more", "give details"]
+
     # max_by_month — check first (before generic metric detection)
     # Catches: "which month most", "highest spending month", "highest month", "most spent month"
     is_month_query = (
@@ -102,6 +113,9 @@ def detect_intent(query: str) -> dict:
     )
     if is_month_query:
         metric = "max_by_month"
+    # breakdown — check before generic so "elaborate" isn't caught by "total_spend"
+    elif any(kw in q for kw in BREAKDOWN_KWS):
+        metric = "breakdown"
     # analysis/opinion intent
     elif any(kw in q for kw in ANALYSIS_KEYWORDS):
         metric = "analysis"
@@ -307,9 +321,9 @@ def compute_result(
             .sort_values(ascending=False).head(5).to_dict()
         )
 
-    # Listing (top 10 only)
+    # Listing (top 10 only) — also triggered by breakdown intent
     list_preview = []
-    if metric == "list":
+    if metric in ("list", "breakdown"):
         preview_df   = filtered.head(10)[["Date", "Description", "Amount", "Category"]]
         list_preview = [
             f"{r['Date']} | {r['Description']} | ₹{r['Amount']:,.0f} | {r['Category']}"
@@ -438,6 +452,19 @@ RULES:
 4. Keep response under 100 words
 5. Use ₹ symbol
 6. Compare against recommended benchmarks (e.g. food should be 20-30% of spend)
+
+{context}"""
+        elif result.get("metric") == "breakdown":
+            system_prompt = f"""You are Finora, a concise AI financial advisor.
+
+The user wants a detailed breakdown of their transactions.
+
+RULES:
+1. Start with: "Based on [count] [scope] transactions, total is ₹X:"
+2. Then list EACH transaction on a new line: "• [Description] — ₹[Amount] ([Date])"
+3. Use ONLY the transactions from VERIFIED FACTS below
+4. Do NOT invent or skip any transaction
+5. Use ₹ symbol
 
 {context}"""
         else:
