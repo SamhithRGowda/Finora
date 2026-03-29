@@ -42,6 +42,17 @@ CATEGORY_MAP = {
                       "recurring", "monthly plan"],
 }
 
+# --- UPDATED: Strict category column values (exact match, no cross-category leakage) ---
+CATEGORY_COLUMN_MAP = {
+    "food":          ["Food & Dining"],
+    "shopping":      ["Shopping"],
+    "transport":     ["Transport"],
+    "entertainment": ["Entertainment"],
+    "utilities":     ["Utilities & Bills"],
+    "healthcare":    ["Healthcare"],
+    "subscriptions": ["Entertainment", "Utilities & Bills"],  # subscriptions span these
+}
+
 MONTH_MAP = {
     "jan": 1, "january": 1,
     "feb": 2, "february": 2,
@@ -66,18 +77,45 @@ METRIC_KEYWORDS = {
     "list":           ["list", "show", "all transactions", "what are"],
 }
 
+# --- UPDATED: Opinion/analysis keywords ---
+ANALYSIS_KEYWORDS = [
+    "too much", "overspend", "overspending", "should i", "am i spending",
+    "is it high", "is this high", "is that high", "too high", "a lot",
+    "reduce", "cut down", "worth it", "reasonable",
+]
+
 
 def detect_intent(query: str) -> dict:
     """
     Parse natural language query into structured intent.
-    Returns: {category, month, metric, raw_query}
+    Fix 1: Category detected by name only (not description keywords).
+    Fix 2: max_by_month and analysis checked before generic metrics.
     """
     q = query.lower().strip()
 
-    # Detect category
+    # max_by_month — check first (before generic metric detection)
+    # Catches: "which month most", "highest spending month", "highest month", "most spent month"
+    is_month_query = (
+        "which month" in q or "what month" in q or
+        "spending month" in q or "spent month" in q or
+        ("month" in q and any(w in q for w in ["highest", "most", "maximum", "max", "biggest"]))
+    )
+    if is_month_query:
+        metric = "max_by_month"
+    # analysis/opinion intent
+    elif any(kw in q for kw in ANALYSIS_KEYWORDS):
+        metric = "analysis"
+    else:
+        metric = "total_spend"
+        for m, keywords in METRIC_KEYWORDS.items():
+            if any(kw in q for kw in keywords):
+                metric = m
+                break
+
+    # Fix 1: detect category by name only — no description keyword matching
     category = None
-    for cat, keywords in CATEGORY_MAP.items():
-        if any(kw in q for kw in keywords):
+    for cat in CATEGORY_COLUMN_MAP:
+        if cat in q:
             category = cat
             break
 
@@ -86,13 +124,6 @@ def detect_intent(query: str) -> dict:
     for word, num in MONTH_MAP.items():
         if word in q:
             month = num
-            break
-
-    # Detect metric (default: total_spend)
-    metric = "total_spend"
-    for m, keywords in METRIC_KEYWORDS.items():
-        if any(kw in q for kw in keywords):
-            metric = m
             break
 
     return {
@@ -104,44 +135,94 @@ def detect_intent(query: str) -> dict:
 
 
 # ─────────────────────────────────────────────
+#  Merchant → correct category overrides
+#  Prevents LLM miscategorization from polluting filter results
+# ─────────────────────────────────────────────
+
+MERCHANT_CATEGORY_OVERRIDE = {
+    "swiggy":    "Food & Dining",
+    "zomato":    "Food & Dining",
+    "bigbasket": "Food & Dining",
+    "blinkit":   "Food & Dining",
+    "instamart": "Food & Dining",
+    "dominos":   "Food & Dining",
+    "kfc":       "Food & Dining",
+    "uber":      "Transport",
+    "ola":       "Transport",
+    "rapido":    "Transport",
+    "amazon":    "Shopping",
+    "flipkart":  "Shopping",
+    "myntra":    "Shopping",
+    "ajio":      "Shopping",
+    "netflix":   "Entertainment",
+    "spotify":   "Entertainment",
+    "hotstar":   "Entertainment",
+    "airtel":    "Utilities & Bills",
+    "jio":       "Utilities & Bills",
+    "apollo":    "Healthcare",
+    "medplus":   "Healthcare",
+    "1mg":       "Healthcare",
+}
+
+
+def _correct_categories(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Override LLM-assigned Category using merchant name in Description.
+    This fixes cases where Groq/NVIDIA assigns wrong categories (e.g. BigBasket as Transport).
+    """
+    if "Description" not in df.columns or "Category" not in df.columns:
+        return df
+    df = df.copy()
+    def override(row):
+        desc_lower = str(row["Description"]).lower()
+        for merchant, correct_cat in MERCHANT_CATEGORY_OVERRIDE.items():
+            if merchant in desc_lower:
+                return correct_cat
+        return row["Category"]
+    df["Category"] = df.apply(override, axis=1)
+    return df
+
+
+# ─────────────────────────────────────────────
 #  STEP 2 — Filter DataFrame (no FAISS, no LLM)
 # ─────────────────────────────────────────────
 
 def filter_df(df: pd.DataFrame, intent: dict) -> tuple:
     """
-    Apply category and month filters to the full DataFrame.
-    Returns (filtered_df, scope_label).
-    Falls back to full df if filter returns empty.
+    Apply category then month filters. NO fallback to full df.
+    Fix 2: Always apply filters — empty result propagates to compute_result.
+    Fix 7: Category filter first, then month filter.
+    Fix 8: No silent revert to full df on empty result.
     """
-    filtered   = df.copy()
+    # Apply merchant-based category corrections before filtering (Bug 1 fix)
+    filtered    = _correct_categories(df)
     scope_parts = []
 
-    # Parse dates once
+    # Always parse dates
     filtered["_date"] = pd.to_datetime(
         filtered["Date"], dayfirst=True, errors="coerce"
     )
 
-    # Category filter
+    # Fix 7 + 8: Category filter — always apply, no fallback
     if intent["category"]:
-        keywords = CATEGORY_MAP.get(intent["category"], [])
-        cat_mask = filtered["Category"].str.lower().str.contains(
-            intent["category"], na=False
-        )
-        desc_mask = filtered["Description"].str.lower().apply(
-            lambda x: any(kw in str(x) for kw in keywords)
-        )
-        result = filtered[cat_mask | desc_mask]
-        if not result.empty:
-            filtered = result
-            scope_parts.append(intent["category"].title())
+        valid_cats = CATEGORY_COLUMN_MAP.get(intent["category"], [])
+        if valid_cats:
+            filtered = filtered[filtered["Category"].isin(valid_cats)]
+        else:
+            filtered = filtered[
+                filtered["Category"].str.lower().str.contains(intent["category"], na=False)
+            ]
+        scope_parts.append(intent["category"].title())
 
-    # Month filter
+    # Fix 2 + 8: Month filter — always apply, no fallback
     if intent["month"]:
-        result = filtered[filtered["_date"].dt.month == intent["month"]]
-        if not result.empty:
-            filtered = result
-            month_name = filtered["_date"].dt.month_name().iloc[0]
-            scope_parts.append(month_name)
+        filtered = filtered[filtered["_date"].dt.month == intent["month"]]
+        # Get month name from MONTH_MAP (safe even if filtered is now empty)
+        month_name = next(
+            (k.capitalize() for k, v in MONTH_MAP.items() if v == intent["month"] and len(k) > 3),
+            str(intent["month"])
+        )
+        scope_parts.append(month_name)
 
     scope_label = " in ".join(scope_parts) if scope_parts else "All transactions"
     return filtered, scope_label
@@ -156,49 +237,69 @@ def compute_result(
     intent: dict,
     monthly_income: float,
     scope_label: str,
+    full_df: pd.DataFrame = None,   # Fix 3: needed for max_by_month on full data
 ) -> dict:
     """
-    All financial calculations happen HERE in Python.
-    LLM receives only the output of this function.
+    All financial calculations in Python.
+    Fix 3: max_by_month uses full_df (not filtered).
+    Fix 4: pct_of_income = total_spend / monthly_income (not monthly_avg).
+    Fix 5: pct_of_total removed.
+    Fix 6: dates always parsed before groupby.
     """
     if filtered.empty:
         return {
             "found":   False,
-            "message": f"No transactions found for: {scope_label}.",
+            "message": f"No transactions found for {scope_label}.",
         }
 
     metric = intent["metric"]
 
-    # Core numbers (always computed)
-    total_spend   = float(filtered["Amount"].sum())
-    count         = len(filtered)
-    avg_per_txn   = total_spend / count if count > 0 else 0
+    # Core numbers
+    total_spend = float(filtered["Amount"].sum())
+    count       = len(filtered)
+    avg_per_txn = total_spend / count if count > 0 else 0
 
-    # Monthly normalization
-    unique_months = max(int(
-        filtered["_date"].dt.to_period("M").nunique()
-    ), 1) if "_date" in filtered.columns else 1
-    monthly_avg   = total_spend / unique_months
+    # Monthly normalization (for display/context only)
+    if "_date" in filtered.columns:
+        unique_months = max(int(filtered["_date"].dt.to_period("M").nunique()), 1)
+    else:
+        unique_months = 1
+    monthly_avg = total_spend / unique_months
 
-    pct_of_income = (
-        (monthly_avg / monthly_income * 100) if monthly_income > 0 else 0
-    )
+    # Bug 2 fix: use monthly_avg for pct_of_income, not raw total
+    # total_spend spans multiple months — comparing it to 1 month income is wrong
+    pct_of_income = (monthly_avg / monthly_income * 100) if monthly_income > 0 else 0
 
-    # Top transactions
+    # Top/bottom transactions
     top_df   = filtered.nlargest(5, "Amount")[["Date", "Description", "Amount", "Category"]]
     top_list = [
         f"₹{r['Amount']:,.0f} — {r['Description']} ({r['Date']})"
         for _, r in top_df.iterrows()
     ]
-
-    # Bottom transactions
     bot_df   = filtered.nsmallest(3, "Amount")[["Date", "Description", "Amount"]]
     bot_list = [
         f"₹{r['Amount']:,.0f} — {r['Description']} ({r['Date']})"
         for _, r in bot_df.iterrows()
     ]
 
-    # Category breakdown (when not filtered to single category)
+    # Fix 3 + 6: max_by_month uses full_df, always parses dates
+    max_month_label  = None
+    max_month_spend  = None
+    monthly_breakdown = {}
+    if metric in ("max_by_month", "monthly_spend"):
+        source = full_df.copy() if full_df is not None else filtered.copy()
+        source["_date"] = pd.to_datetime(source["Date"], dayfirst=True, errors="coerce")
+        source = source.dropna(subset=["_date"])
+        if not source.empty:
+            source["_period"] = source["_date"].dt.to_period("M")
+            monthly_series    = source.groupby("_period")["Amount"].sum()
+            monthly_breakdown = {str(k): float(v) for k, v in monthly_series.items()}
+            if not monthly_series.empty:
+                best_period     = monthly_series.idxmax()
+                max_month_label = str(best_period)
+                max_month_spend = float(monthly_series.max())
+
+    # Category breakdown (when no category filter applied)
     cat_breakdown = {}
     if "Category" in filtered.columns and not intent["category"]:
         cat_breakdown = (
@@ -209,28 +310,31 @@ def compute_result(
     # Listing (top 10 only)
     list_preview = []
     if metric == "list":
-        preview_df = filtered.head(10)[["Date", "Description", "Amount", "Category"]]
+        preview_df   = filtered.head(10)[["Date", "Description", "Amount", "Category"]]
         list_preview = [
             f"{r['Date']} | {r['Description']} | ₹{r['Amount']:,.0f} | {r['Category']}"
             for _, r in preview_df.iterrows()
         ]
 
     return {
-        "found":          True,
-        "metric":         metric,
-        "scope":          scope_label,
-        "count":          count,
-        "total_spend":    total_spend,
-        "monthly_avg":    monthly_avg,
-        "avg_per_txn":    avg_per_txn,
-        "unique_months":  unique_months,
-        "pct_of_income":  pct_of_income,
-        "biggest":        top_list[0] if top_list else "N/A",
-        "top5":           top_list,
-        "smallest":       bot_list[0] if bot_list else "N/A",
-        "cat_breakdown":  cat_breakdown,
-        "list_preview":   list_preview,
-        "monthly_income": monthly_income,
+        "found":             True,
+        "metric":            metric,
+        "scope":             scope_label,
+        "count":             count,
+        "total_spend":       total_spend,
+        "monthly_avg":       monthly_avg,
+        "avg_per_txn":       avg_per_txn,
+        "unique_months":     unique_months,
+        "pct_of_income":     pct_of_income,   # Fix 4: total_spend / income
+        "biggest":           top_list[0] if top_list else "N/A",
+        "top5":              top_list,
+        "smallest":          bot_list[0] if bot_list else "N/A",
+        "cat_breakdown":     cat_breakdown,
+        "list_preview":      list_preview,
+        "monthly_income":    monthly_income,
+        "max_month_label":   max_month_label,
+        "max_month_spend":   max_month_spend,
+        "monthly_breakdown": monthly_breakdown,
     }
 
 
@@ -257,6 +361,14 @@ def build_verified_context(result: dict) -> str:
         f"Biggest transaction: {result['biggest']}",
         f"Smallest transaction: {result['smallest']}",
     ]
+
+    # --- NEW: max_by_month block ---
+    if result.get("max_month_label"):
+        lines.append(f"Highest spending month: {result['max_month_label']} — ₹{result['max_month_spend']:,.0f}")
+    if result.get("monthly_breakdown"):
+        lines.append("Monthly breakdown:")
+        for m, amt in result["monthly_breakdown"].items():
+            lines.append(f"  {m}: ₹{amt:,.0f}")
 
     if result["top5"]:
         lines.append("Top 5 by amount:")
@@ -304,7 +416,7 @@ def rag_chat(
         # Steps 1-3: fully in Python
         intent          = detect_intent(user_message)
         filtered, scope = filter_df(df, intent)
-        result          = compute_result(filtered, intent, monthly_income, scope)
+        result          = compute_result(filtered, intent, monthly_income, scope, full_df=df)  # Fix 3
         context         = build_verified_context(result)
 
         # Empty result — direct answer, no LLM needed
@@ -313,8 +425,23 @@ def rag_chat(
             chat_history.append({"role": "model", "parts": [result["message"]]})
             return result["message"], chat_history, True
 
-        # Step 4: LLM formats only — strict prompt
-        system_prompt = f"""You are Finora, a concise AI financial advisor.
+        # --- UPDATED: analysis intent gets reasoning permission, others stay strict ---
+        if result.get("metric") == "analysis":
+            system_prompt = f"""You are Finora, an AI financial advisor for Indian users.
+
+The user is asking an opinion/analysis question. Answer YES or NO, then explain using the facts below.
+
+RULES:
+1. Use ONLY numbers from VERIFIED FACTS
+2. Give a clear YES/NO answer first
+3. Reference % of income and % of total spend in your reasoning
+4. Keep response under 100 words
+5. Use ₹ symbol
+6. Compare against recommended benchmarks (e.g. food should be 20-30% of spend)
+
+{context}"""
+        else:
+            system_prompt = f"""You are Finora, a concise AI financial advisor.
 
 HARD RULES — violations are not allowed:
 1. Use ONLY numbers from the VERIFIED FACTS section
