@@ -87,6 +87,24 @@ ANALYSIS_KEYWORDS = [
     "reduce", "cut down", "worth it", "reasonable",
 ]
 
+# Savings intent keywords
+SAVINGS_KEYWORDS = [
+    "how much did i save", "how much have i saved", "what did i save",
+    "my savings", "savings this month", "savings in", "how much saved",
+    "saving this month", "saved this month", "did i save",
+    "money saved", "leftover", "remaining",
+]
+
+# Comparison intent keywords
+COMPARE_KEYWORDS = [
+    "compare", "vs", "versus", "more than", "less than",
+    "difference between", "higher in", "lower in",
+    "higher than", "lower than", "greater than",
+    "did i spend more", "did i spend less", "which was more",
+    "compared to", "than last month", "than previous",
+    "more in", "less in",
+]
+
 
 def detect_intent(query: str) -> dict:
     """
@@ -116,6 +134,12 @@ def detect_intent(query: str) -> dict:
     # breakdown — check before generic so "elaborate" isn't caught by "total_spend"
     elif any(kw in q for kw in BREAKDOWN_KWS):
         metric = "breakdown"
+    # comparison between two months — check before savings/analysis
+    elif any(kw in q for kw in COMPARE_KEYWORDS):
+        metric = "compare"
+    # savings query
+    elif any(kw in q for kw in SAVINGS_KEYWORDS):
+        metric = "savings"
     # analysis/opinion intent
     elif any(kw in q for kw in ANALYSIS_KEYWORDS):
         metric = "analysis"
@@ -133,16 +157,23 @@ def detect_intent(query: str) -> dict:
             category = cat
             break
 
-    # Detect month
-    month = None
+    # Detect month(s) — detect up to two for comparison queries
+    month  = None
+    month2 = None
+    found_months = []
     for word, num in MONTH_MAP.items():
-        if word in q:
-            month = num
+        if word in q and num not in found_months:
+            found_months.append(num)
+        if len(found_months) == 2:
             break
+    if found_months:
+        month  = found_months[0]
+        month2 = found_months[1] if len(found_months) > 1 else None
 
     return {
         "category":  category,
         "month":     month,
+        "month2":    month2,    # second month for compare intent
         "metric":    metric,
         "raw_query": query,
     }
@@ -313,6 +344,39 @@ def compute_result(
                 max_month_label = str(best_period)
                 max_month_spend = float(monthly_series.max())
 
+    # Feature 4: savings computation
+    savings_amount   = max(monthly_income - monthly_avg, 0)
+    savings_rate     = (savings_amount / monthly_income * 100) if monthly_income > 0 else 0
+    overspent        = monthly_avg > monthly_income
+    overspent_by     = max(monthly_avg - monthly_income, 0)
+
+    # Feature 5: compare two months using full_df
+    compare_result = {}
+    if intent.get("metric") == "compare" and intent.get("month2") and full_df is not None:
+        src = full_df.copy()
+        src["_date2"] = pd.to_datetime(src["Date"], dayfirst=True, errors="coerce")
+        # Apply category filter if present
+        if intent.get("category"):
+            valid_cats = CATEGORY_COLUMN_MAP.get(intent["category"], [])
+            if valid_cats:
+                src = _correct_categories(src)
+                src = src[src["Category"].isin(valid_cats)]
+        m1_data = src[src["_date2"].dt.month == intent["month"]]
+        m2_data = src[src["_date2"].dt.month == intent["month2"]]
+        m1_total = float(m1_data["Amount"].sum())
+        m2_total = float(m2_data["Amount"].sum())
+        # Get readable month names
+        m1_name = next((k.capitalize() for k, v in MONTH_MAP.items() if v == intent["month"] and len(k) > 3), str(intent["month"]))
+        m2_name = next((k.capitalize() for k, v in MONTH_MAP.items() if v == intent["month2"] and len(k) > 3), str(intent["month2"]))
+        compare_result = {
+            "month1_name":  m1_name,
+            "month2_name":  m2_name,
+            "month1_total": m1_total,
+            "month2_total": m2_total,
+            "difference":   abs(m1_total - m2_total),
+            "higher_month": m1_name if m1_total >= m2_total else m2_name,
+        }
+
     # Category breakdown (when no category filter applied)
     cat_breakdown = {}
     if "Category" in filtered.columns and not intent["category"]:
@@ -339,7 +403,7 @@ def compute_result(
         "monthly_avg":       monthly_avg,
         "avg_per_txn":       avg_per_txn,
         "unique_months":     unique_months,
-        "pct_of_income":     pct_of_income,   # Fix 4: total_spend / income
+        "pct_of_income":     pct_of_income,
         "biggest":           top_list[0] if top_list else "N/A",
         "top5":              top_list,
         "smallest":          bot_list[0] if bot_list else "N/A",
@@ -349,6 +413,13 @@ def compute_result(
         "max_month_label":   max_month_label,
         "max_month_spend":   max_month_spend,
         "monthly_breakdown": monthly_breakdown,
+        # Feature 4: savings
+        "savings_amount":    savings_amount,
+        "savings_rate":      savings_rate,
+        "overspent":         overspent,
+        "overspent_by":      overspent_by,
+        # Feature 5: comparison
+        "compare_result":    compare_result,
     }
 
 
@@ -396,6 +467,25 @@ def build_verified_context(result: dict) -> str:
     if result["list_preview"]:
         lines.append(f"Transactions (showing top 10 of {result['count']}):")
         lines.extend(f"  {t}" for t in result["list_preview"])
+
+    # Feature 4: savings block
+    if result.get("metric") == "savings":
+        lines.append(f"Monthly income     : ₹{result['monthly_income']:,.0f}")
+        lines.append(f"Monthly avg spend  : ₹{result['monthly_avg']:,.0f}")
+        if result["overspent"]:
+            lines.append(f"Status             : OVERSPENT by ₹{result['overspent_by']:,.0f}")
+        else:
+            lines.append(f"Monthly savings    : ₹{result['savings_amount']:,.0f}")
+            lines.append(f"Savings rate       : {result['savings_rate']:.1f}%")
+
+    # Feature 5: comparison block
+    if result.get("compare_result"):
+        cr = result["compare_result"]
+        lines.append(f"Comparison:")
+        lines.append(f"  {cr['month1_name']}: ₹{cr['month1_total']:,.0f}")
+        lines.append(f"  {cr['month2_name']}: ₹{cr['month2_total']:,.0f}")
+        lines.append(f"  Difference: ₹{cr['difference']:,.0f}")
+        lines.append(f"  Higher spend: {cr['higher_month']}")
 
     lines.append("=== END — DO NOT INVENT ANY OTHER NUMBERS ===")
     return "\n".join(lines)
@@ -452,6 +542,25 @@ RULES:
 4. Keep response under 100 words
 5. Use ₹ symbol
 6. Compare against recommended benchmarks (e.g. food should be 20-30% of spend)
+
+{context}"""
+        elif result.get("metric") == "savings":
+            system_prompt = f"""You are Finora, a concise AI financial advisor.
+
+RULES:
+1. Use ONLY numbers from VERIFIED FACTS
+2. Answer how much the user saved (or overspent) this period
+3. Mention savings rate and whether it is healthy (target: 20-30%)
+4. Keep under 80 words, use ₹ symbol
+
+{context}"""
+        elif result.get("metric") == "compare":
+            system_prompt = f"""You are Finora, a concise AI financial advisor.
+
+RULES:
+1. Use ONLY numbers from VERIFIED FACTS
+2. State which month had higher spend and by how much
+3. Keep under 80 words, use ₹ symbol
 
 {context}"""
         elif result.get("metric") == "breakdown":
