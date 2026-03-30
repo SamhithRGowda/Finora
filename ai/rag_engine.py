@@ -157,12 +157,15 @@ def detect_intent(query: str) -> dict:
             category = cat
             break
 
-    # Detect month(s) — detect up to two for comparison queries
+    # Detect month(s) — use word boundary matching to avoid
+    # false matches like "sep" inside "separately", "nov" inside "novel"
+    import re as _re
     month  = None
     month2 = None
     found_months = []
     for word, num in MONTH_MAP.items():
-        if word in q and num not in found_months:
+        # \b = word boundary — "sep" won't match inside "separately"
+        if _re.search(r'\b' + word + r'\b', q) and num not in found_months:
             found_months.append(num)
         if len(found_months) == 2:
             break
@@ -559,8 +562,10 @@ RULES:
 
 RULES:
 1. Use ONLY numbers from VERIFIED FACTS
-2. State which month had higher spend and by how much
-3. Keep under 80 words, use ₹ symbol
+2. ALWAYS follow this exact format:
+   "[Month1] spend: ₹X. [Month2] spend: ₹Y. [Higher month] was higher by ₹Z."
+3. Never give only the difference — always show both month amounts first
+4. Use ₹ symbol
 
 {context}"""
         elif result.get("metric") == "breakdown":
