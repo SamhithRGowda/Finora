@@ -454,6 +454,25 @@ if active_tab == "🏠 Dashboard":
     st.markdown("---")
 
     # ── Quick navigation ──────────────────────────────────────────────────────
+    # ── 8: Monthly Spending Trend Chart ─────────────────────────────────────
+    st.markdown('<div class="section-title">📈 Monthly Spending Trend</div>', unsafe_allow_html=True)
+    try:
+        trend_df = cat_df.copy()
+        trend_df["_date"] = pd.to_datetime(trend_df["Date"], dayfirst=True, errors="coerce")
+        trend_df = trend_df.dropna(subset=["_date"])
+        trend_df["Month"] = trend_df["_date"].dt.to_period("M")
+        monthly_totals = (
+            trend_df.groupby("Month")["Amount"].sum()
+            .reset_index()
+        )
+        monthly_totals["Month"] = monthly_totals["Month"].dt.to_timestamp().dt.strftime("%b %Y")
+        monthly_totals = monthly_totals.rename(columns={"Amount": "Spend (₹)"})
+        st.bar_chart(monthly_totals.set_index("Month"), color="#a78bfa")
+    except Exception:
+        pass   # silently skip if data not ready
+
+    st.markdown("---")
+
     st.markdown('<div class="section-title">🔗 Explore Details</div>', unsafe_allow_html=True)
     st.markdown('<div style="color:#9ca3af;font-size:.9rem;margin-bottom:1rem;">Use the sidebar to dive deeper into any area.</div>', unsafe_allow_html=True)
     nav_cols = st.columns(5)
@@ -1176,8 +1195,12 @@ elif active_tab == "💬 Chat":
         st.caption("💡 Install `faiss-cpu` and `sentence-transformers` to enable smarter RAG-based chat.")
 
     suggestions = [
-        "Am I overspending on food?", "Where can I cut costs?", "How much should I save?",
-        "What's my biggest expense?", "Give me a budget plan", "Should I start a SIP?",
+        "How much did I spend on food?",
+        "Compare January vs February",
+        "Which month did I spend the most?",
+        "How much did I save?",
+        "Transport spend in February",
+        "Did I overspend on shopping?",
     ]
     st.markdown("**💡 Try asking:**")
     cols = st.columns(3)

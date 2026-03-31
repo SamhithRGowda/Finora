@@ -344,7 +344,8 @@ def compute_result(
             monthly_breakdown = {str(k): float(v) for k, v in monthly_series.items()}
             if not monthly_series.empty:
                 best_period     = monthly_series.idxmax()
-                max_month_label = str(best_period)
+                # Format as 'December 2024' instead of '2024-12'
+                max_month_label = best_period.to_timestamp().strftime('%B %Y')
                 max_month_spend = float(monthly_series.max())
 
     # Feature 4: savings computation
