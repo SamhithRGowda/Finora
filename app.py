@@ -44,9 +44,11 @@ st.markdown("""
 html,body,[class*="css"]{font-family:'DM Sans',sans-serif;}
 .stApp{background:linear-gradient(135deg,#0f0f1a 0%,#1a1a2e 50%,#16213e 100%);color:#e8e8f0;}
 [data-testid="stSidebar"]{background:linear-gradient(180deg,#0d0d1f 0%,#1a1a3a 100%);border-right:1px solid rgba(100,100,255,0.15);}
-.finora-header{text-align:center;padding:2rem 0 1.5rem 0;}
-.finora-logo{font-family:'Syne',sans-serif;font-size:3.2rem;font-weight:800;background:linear-gradient(90deg,#a78bfa,#60a5fa,#34d399);-webkit-background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:-1px;}
-.finora-tagline{font-size:.95rem;color:#9ca3af;margin-top:-.4rem;}
+.finora-header{text-align:center;padding:2.5rem 0 1.5rem 0;}
+.finora-logo{font-family:'Syne',sans-serif;font-size:3.5rem;font-weight:800;background:linear-gradient(90deg,#a78bfa,#60a5fa,#34d399);-webkit-background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:-2px;margin-bottom:.3rem;}
+.finora-tagline{font-size:1rem;color:#9ca3af;margin-top:-.2rem;letter-spacing:.3px;}
+.finora-badges{display:flex;justify-content:center;gap:.6rem;flex-wrap:wrap;margin-top:.9rem;}
+.badge{background:rgba(167,139,250,0.12);border:1px solid rgba(167,139,250,0.3);border-radius:999px;padding:.2rem .75rem;font-size:.75rem;color:#c4b5fd;font-family:'DM Sans',sans-serif;}
 .section-title{font-family:'Syne',sans-serif;font-size:1.3rem;font-weight:700;color:#c4b5fd;border-left:3px solid #7c3aed;padding-left:.75rem;margin:1.5rem 0 1rem 0;}
 .ai-badge{display:inline-block;background:linear-gradient(90deg,#7c3aed,#2563eb);color:white;font-size:.7rem;font-weight:700;padding:2px 8px;border-radius:20px;letter-spacing:.08em;margin-left:8px;vertical-align:middle;}
 .card{background:rgba(255,255,255,0.04);border:1px solid rgba(124,58,237,0.2);border-radius:12px;padding:1.2rem;margin-bottom:.8rem;}
@@ -82,7 +84,15 @@ div[data-testid="stMetricValue"]{font-family:'Syne',sans-serif;color:#a78bfa;}
 st.markdown("""
 <div class="finora-header">
     <div class="finora-logo">💎 Finora</div>
-    <div class="finora-tagline">AI Financial Intelligence System for India · Powered by LLM</div>
+    <div class="finora-tagline">AI-Powered Financial Intelligence System for India</div>
+    <div class="finora-badges">
+        <span class="badge">🐍 Python</span>
+        <span class="badge">⚡ Streamlit</span>
+        <span class="badge">🤖 LLM (Groq / NVIDIA)</span>
+        <span class="badge">🔍 RAG Engine</span>
+        <span class="badge">📊 Pandas</span>
+        <span class="badge">🏦 Indian Banks</span>
+    </div>
 </div>
 """, unsafe_allow_html=True)
 st.markdown("---")
@@ -590,6 +600,10 @@ elif active_tab == "📄 Bank Statement":
     if df is not None and dataframe_is_valid(df):
         with st.spinner("🤖 Categorizing..." if gemini_ready else "📂 Categorizing..."):
             cat_df = categorize_with_gemini(df) if gemini_ready else categorize_transactions(df)
+        # Apply merchant-based category correction after LLM categorization
+        # Fixes cases where Groq/NVIDIA assigns wrong categories (e.g. Flipkart as Food & Dining)
+        from utils.categorizer import correct_categories
+        cat_df = correct_categories(cat_df)
         st.session_state.transactions_df = df
         st.session_state.categorized_df  = cat_df
         st.session_state.financial_context = ""
@@ -1217,9 +1231,16 @@ elif active_tab == "💬 Chat":
         if role == "user" and idx == 0 and "User says:" in text:
             text = text.split("User says:")[-1].strip()
         if role == "user":
-            st.markdown(f'<div class="chat-label-user">👤 You</div><div class="chat-user">{text}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="chat-label-user">👤 You</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="chat-user">{text}</div>', unsafe_allow_html=True)
         else:
-            st.markdown(f'<div class="chat-label-bot">🤖 Finora</div><div class="chat-bot">{text}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="chat-label-bot">🤖 Finora</div>', unsafe_allow_html=True)
+            # Use container with custom style so markdown renders bold/italic correctly
+            with st.container():
+                st.markdown(
+                    f'<div class="chat-bot">' + text.replace("**", "__") + '</div>',
+                    unsafe_allow_html=True
+                )
 
     user_input = st.chat_input("Ask anything about your finances...")
     if "_pending" in st.session_state:

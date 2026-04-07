@@ -183,52 +183,12 @@ def detect_intent(query: str) -> dict:
 
 
 # ─────────────────────────────────────────────
-#  Merchant → correct category overrides
-#  Prevents LLM miscategorization from polluting filter results
+#  Merchant category correction — imported from utils
 # ─────────────────────────────────────────────
-
-MERCHANT_CATEGORY_OVERRIDE = {
-    "swiggy":    "Food & Dining",
-    "zomato":    "Food & Dining",
-    "bigbasket": "Food & Dining",
-    "blinkit":   "Food & Dining",
-    "instamart": "Food & Dining",
-    "dominos":   "Food & Dining",
-    "kfc":       "Food & Dining",
-    "uber":      "Transport",
-    "ola":       "Transport",
-    "rapido":    "Transport",
-    "amazon":    "Shopping",
-    "flipkart":  "Shopping",
-    "myntra":    "Shopping",
-    "ajio":      "Shopping",
-    "netflix":   "Entertainment",
-    "spotify":   "Entertainment",
-    "hotstar":   "Entertainment",
-    "airtel":    "Utilities & Bills",
-    "jio":       "Utilities & Bills",
-    "apollo":    "Healthcare",
-    "medplus":   "Healthcare",
-    "1mg":       "Healthcare",
-}
-
-
-def _correct_categories(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Override LLM-assigned Category using merchant name in Description.
-    This fixes cases where Groq/NVIDIA assigns wrong categories (e.g. BigBasket as Transport).
-    """
-    if "Description" not in df.columns or "Category" not in df.columns:
-        return df
-    df = df.copy()
-    def override(row):
-        desc_lower = str(row["Description"]).lower()
-        for merchant, correct_cat in MERCHANT_CATEGORY_OVERRIDE.items():
-            if merchant in desc_lower:
-                return correct_cat
-        return row["Category"]
-    df["Category"] = df.apply(override, axis=1)
-    return df
+# Moved to utils/categorizer.py for clean architecture.
+# Imported here so filter_df can use it without duplication.
+from utils.categorizer import correct_categories as _correct_categories
+from utils.categorizer import MERCHANT_CATEGORY_OVERRIDE
 
 
 # ─────────────────────────────────────────────
