@@ -607,16 +607,19 @@ elif active_tab == "📄 Bank Statement":
         st.session_state.transactions_df = df
         st.session_state.categorized_df  = cat_df
         st.session_state.financial_context = ""
-        unknown_count = int(df["Needs_Review"].sum()) if "Needs_Review" in df.columns else 0
-        if unknown_count:
-            st.warning(f"⚠️ **{unknown_count} transactions** have unclear narrations — label them below.")
+        # Warning is shown live below after data loads (reflects label saves correctly)
 
     if dataframe_is_valid(st.session_state.transactions_df):
         df     = st.session_state.transactions_df
         cat_df = st.session_state.categorized_df
 
+        # ── Live unknown count — reads current state after any saves ──────────
+        live_unknown = int(df["Needs_Review"].sum()) if "Needs_Review" in df.columns else 0
+        if live_unknown > 0:
+            st.warning(f"⚠️ **{live_unknown} transaction(s)** have unclear narrations — label them below.")
+
         # ── Manual Labeling UI ────────────────────────────────────────────────
-        if "Needs_Review" in df.columns and df["Needs_Review"].sum() > 0:
+        if "Needs_Review" in df.columns and live_unknown > 0:
             unknown_df = df[df["Needs_Review"] == True].copy()
             st.markdown("---")
             st.markdown('<div class="section-title">✏️ Review Unknown Transactions</div>', unsafe_allow_html=True)
@@ -650,8 +653,29 @@ elif active_tab == "📄 Bank Statement":
                 "Investment & Savings", "Other"
             ]
 
+            # Map description keywords → category index for auto-detection
+            DESC_TO_CAT = {
+                "food": 0, "swiggy": 0, "zomato": 0, "restaurant": 0,
+                "dining": 0, "lunch": 0, "dinner": 0, "groceries": 0,
+                "shopping": 1, "amazon": 1, "flipkart": 1, "myntra": 1,
+                "transport": 2, "uber": 2, "ola": 2, "petrol": 2, "cab": 2,
+                "entertainment": 3, "netflix": 3, "movie": 3,
+                "electricity": 4, "bill": 4, "airtel": 4, "jio": 4,
+                "doctor": 5, "medicine": 5, "hospital": 5,
+                "credit card": 6, "emi": 6, "loan": 6,
+                "rent": 8, "friend": 8, "transfer": 8,
+            }
+
             for idx in unknown_df.index:
                 row = df.loc[idx]
+                # Auto-detect category from what user typed in desc box
+                current_desc = st.session_state.get(f"desc_{idx}", "").lower()
+                auto_cat_idx = 8  # default Other
+                for kw, cat_idx in DESC_TO_CAT.items():
+                    if kw in current_desc:
+                        auto_cat_idx = cat_idx
+                        break
+
                 with st.expander(
                     f"Transaction {idx+1} — ₹{row['Amount']:,.0f} on {row['Date']}  ·  {row['Description']}",
                     expanded=False
@@ -669,7 +693,7 @@ elif active_tab == "📄 Bank Statement":
                         st.selectbox(
                             "Category",
                             CATEGORY_OPTIONS,
-                            index=8,   # default to "Other"
+                            index=auto_cat_idx,  # auto-detected from description
                             key=f"cat_{idx}",
                         )
 
@@ -684,9 +708,19 @@ elif active_tab == "📄 Bank Statement":
                             st.session_state.transactions_df.at[idx, "Description"] = new_desc
                             st.session_state.categorized_df.at[idx,  "Description"] = new_desc
                         if "Category" in st.session_state.categorized_df.columns:
+                            # Save category — use auto-detected if user didn't pick manually
                             st.session_state.categorized_df.at[idx, "Category"] = new_cat
+                        # Mark as reviewed regardless of whether user filled description
                         st.session_state.transactions_df.at[idx, "Needs_Review"] = False
-                    st.success("✅ Labels saved!")
+                        st.session_state.categorized_df.at[idx, "Needs_Review"] = False
+                        # Mark as manually labelled — prevents correct_categories overwriting
+                        st.session_state.categorized_df.at[idx, "_manual"] = True
+                    saved = sum(1 for idx in unknown_df.index if st.session_state.get(f"desc_{idx}", ""))
+                    skipped = len(unknown_df) - saved
+                    msg = f"✅ {saved} label(s) saved"
+                    if skipped:
+                        msg += f" · {skipped} skipped (marked as Other)"
+                    st.success(msg)
                     st.rerun()
             with col_skip2:
                 if st.button("⏭️ Skip All", use_container_width=True):

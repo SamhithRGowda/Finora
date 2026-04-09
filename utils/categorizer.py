@@ -79,6 +79,9 @@ def correct_categories(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
     def _override(row) -> str:
+        # Skip rows the user manually labelled — never overwrite user input
+        if row.get("_manual", False):
+            return row["Category"]
         desc_lower = str(row["Description"]).lower()
         for merchant, correct_cat in MERCHANT_CATEGORY_OVERRIDE.items():
             if merchant in desc_lower:
