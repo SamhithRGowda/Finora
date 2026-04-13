@@ -482,9 +482,35 @@ def rag_chat(
 
     try:
         # Steps 1-3: fully in Python
-        intent          = detect_intent(user_message)
+        intent = detect_intent(user_message)
+
+        # ── Out-of-scope detection ────────────────────────────────────────────
+        # If no financial intent detected at all, route to general LLM chat
+        # instead of dumping a generic spending summary
+        FINANCIAL_SIGNALS = [
+            "spend", "spent", "save", "saving", "transaction", "money",
+            "budget", "income", "expense", "cost", "amount", "bank",
+            "food", "shopping", "transport", "month", "january", "february",
+            "march", "april", "may", "june", "july", "august", "september",
+            "october", "november", "december", "jan", "feb", "mar", "apr",
+            "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+            "how much", "compare", "biggest", "largest", "total", "avg",
+            "overspend", "subscription", "category", "utilities", "healthcare",
+        ]
+        q_lower = user_message.lower()
+        is_financial = (
+            intent["category"] is not None or
+            intent["month"] is not None or
+            intent["metric"] in ("savings", "compare", "max_by_month", "breakdown", "analysis") or
+            any(sig in q_lower for sig in FINANCIAL_SIGNALS)
+        )
+        if not is_financial:
+            # Not a finance question — let LLM answer freely as a general assistant
+            reply, updated = chat_with_finances(user_message, chat_history, financial_context)
+            return reply, updated, False
+
         filtered, scope = filter_df(df, intent)
-        result          = compute_result(filtered, intent, monthly_income, scope, full_df=df)  # Fix 3
+        result          = compute_result(filtered, intent, monthly_income, scope, full_df=df)
         context         = build_verified_context(result)
 
         # Empty result — direct answer, no LLM needed

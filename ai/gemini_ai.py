@@ -276,27 +276,45 @@ Keep total under 300 words. Use ₹ symbols. Be specific, not generic."""
 # ─────────────────────────────────────────────
 
 def build_financial_context(df: pd.DataFrame, monthly_income: float) -> str:
-    """Build a compact summary of finances for the chat system prompt."""
+    """Build a compact summary of finances for the chat system prompt.
+    All spend figures are normalized to MONTHLY averages so the LLM
+    never confuses a 6-month total (e.g. Rs1,51,859) with one month's spend.
+    """
+    import pandas as pd
+
+    # Detect number of months in data
+    try:
+        dates = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce").dropna()
+        num_months = max(int(dates.dt.to_period("M").nunique()), 1)
+    except Exception:
+        num_months = 1
+
+    total_raw     = df["Amount"].sum()
+    monthly_spend = total_raw / num_months
+    monthly_save  = monthly_income - monthly_spend
+    savings_rate  = max(monthly_save, 0) / monthly_income * 100 if monthly_income > 0 else 0
+
     summary = df.groupby("Category")["Amount"].sum().sort_values(ascending=False)
-    total = df["Amount"].sum()
-    savings = monthly_income - total
 
     lines = [
-        f"Monthly Income: ₹{monthly_income:,.0f}",
-        f"Total Spent: ₹{total:,.0f}",
-        f"Savings: ₹{savings:,.0f}",
-        f"Transactions: {len(df)}",
+        f"DATA COVERS: {num_months} month(s) of transactions",
+        f"Monthly Income       : Rs{monthly_income:,.0f}",
+        f"Avg Monthly Spend    : Rs{monthly_spend:,.0f}  (total Rs{total_raw:,.0f} over {num_months} months — NOT one month)",
+        f"Monthly Savings      : Rs{max(monthly_save, 0):,.0f}",
+        f"Savings Rate         : {savings_rate:.1f}%",
+        f"Total Transactions   : {len(df)}",
         "",
-        "Spending by Category:",
+        "Monthly Spend by Category (averaged across all months):",
     ]
     for cat, amt in summary.items():
-        pct = amt / total * 100 if total > 0 else 0
-        lines.append(f"  {cat}: ₹{amt:,.0f} ({pct:.1f}%)")
+        monthly_cat = amt / num_months
+        pct = monthly_cat / monthly_income * 100 if monthly_income > 0 else 0
+        lines.append(f"  {cat}: Rs{monthly_cat:,.0f}/month ({pct:.1f}% of income)")
 
     top5 = df.nlargest(5, "Amount")[["Description", "Amount", "Category"]]
-    lines.append("\nTop 5 Transactions:")
+    lines.append("\nTop 5 Single Transactions (individual, not monthly totals):")
     for _, row in top5.iterrows():
-        lines.append(f"  {row['Description']}: ₹{row['Amount']:,.0f} ({row['Category']})")
+        lines.append(f"  {row['Description']}: Rs{row['Amount']:,.0f} ({row['Category']})")
 
     return "\n".join(lines)
 
