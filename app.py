@@ -40,39 +40,387 @@ st.set_page_config(page_title="Finora", page_icon="💎", layout="wide",
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500&display=swap');
-html,body,[class*="css"]{font-family:'DM Sans',sans-serif;}
-.stApp{background:linear-gradient(135deg,#0f0f1a 0%,#1a1a2e 50%,#16213e 100%);color:#e8e8f0;}
-[data-testid="stSidebar"]{background:linear-gradient(180deg,#0d0d1f 0%,#1a1a3a 100%);border-right:1px solid rgba(100,100,255,0.15);}
-.finora-header{text-align:center;padding:2.5rem 0 1.5rem 0;}
-.finora-logo{font-family:'Syne',sans-serif;font-size:3.5rem;font-weight:800;background:linear-gradient(90deg,#a78bfa,#60a5fa,#34d399);-webkit-background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:-2px;margin-bottom:.3rem;}
-.finora-tagline{font-size:1rem;color:#9ca3af;margin-top:-.2rem;letter-spacing:.3px;}
-.finora-badges{display:flex;justify-content:center;gap:.6rem;flex-wrap:wrap;margin-top:.9rem;}
-.badge{background:rgba(167,139,250,0.12);border:1px solid rgba(167,139,250,0.3);border-radius:999px;padding:.2rem .75rem;font-size:.75rem;color:#c4b5fd;font-family:'DM Sans',sans-serif;}
-.section-title{font-family:'Syne',sans-serif;font-size:1.3rem;font-weight:700;color:#c4b5fd;border-left:3px solid #7c3aed;padding-left:.75rem;margin:1.5rem 0 1rem 0;}
-.ai-badge{display:inline-block;background:linear-gradient(90deg,#7c3aed,#2563eb);color:white;font-size:.7rem;font-weight:700;padding:2px 8px;border-radius:20px;letter-spacing:.08em;margin-left:8px;vertical-align:middle;}
-.card{background:rgba(255,255,255,0.04);border:1px solid rgba(124,58,237,0.2);border-radius:12px;padding:1.2rem;margin-bottom:.8rem;}
-.alert-card{background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.3);border-radius:10px;padding:.9rem 1.1rem;margin-bottom:.6rem;font-size:.95rem;}
-.success-card{background:rgba(52,211,153,0.08);border:1px solid rgba(52,211,153,0.3);border-radius:10px;padding:.9rem 1.1rem;margin-bottom:.6rem;font-size:.95rem;}
-.insight-card{background:rgba(167,139,250,0.07);border:1px solid rgba(167,139,250,0.2);border-radius:10px;padding:.9rem 1.1rem;margin-bottom:.6rem;font-size:.95rem;line-height:1.5;}
-.scenario-card{background:rgba(96,165,250,0.07);border:1px solid rgba(96,165,250,0.2);border-radius:12px;padding:1.2rem;margin-bottom:.8rem;}
-.scenario-title{font-family:'Syne',sans-serif;font-weight:700;font-size:1rem;margin-bottom:.5rem;color:#60a5fa;}
-.chat-user{background:rgba(96,165,250,0.12);border:1px solid rgba(96,165,250,0.25);border-radius:12px 12px 4px 12px;padding:.8rem 1rem;margin:.5rem 0 .5rem 3rem;font-size:.95rem;}
-.chat-bot{background:rgba(167,139,250,0.10);border:1px solid rgba(167,139,250,0.25);border-radius:12px 12px 12px 4px;padding:.8rem 1rem;margin:.5rem 3rem .5rem 0;font-size:.95rem;line-height:1.6;}
-.chat-label-user{font-size:.72rem;color:#60a5fa;font-weight:600;margin-bottom:4px;}
-.chat-label-bot{font-size:.72rem;color:#a78bfa;font-weight:600;margin-bottom:4px;}
-.tax-old{background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.3);border-radius:12px;padding:1.5rem;}
-.tax-new{background:rgba(52,211,153,0.08);border:1px solid rgba(52,211,153,0.3);border-radius:12px;padding:1.5rem;}
-.tax-row{display:flex;justify-content:space-between;font-size:.88rem;padding:.3rem 0;border-bottom:1px solid rgba(255,255,255,0.05);}
-.tax-total{font-family:'Syne',sans-serif;font-weight:700;font-size:1.2rem;margin-top:.5rem;}
-.recommend-banner{background:linear-gradient(135deg,#1d4ed8,#7c3aed);border-radius:12px;padding:1.25rem 1.5rem;text-align:center;margin-top:1.5rem;}
-.recommend-text{font-family:'Syne',sans-serif;font-size:1.4rem;font-weight:800;color:white;}
-.recommend-reason{font-size:.9rem;color:rgba(255,255,255,0.8);margin-top:.4rem;}
-.api-key-box{background:rgba(250,204,21,0.07);border:1px solid rgba(250,204,21,0.3);border-radius:10px;padding:1rem 1.2rem;margin-bottom:1rem;}
-.stButton>button{background:linear-gradient(135deg,#7c3aed,#2563eb);color:white;border:none;border-radius:8px;font-family:'Syne',sans-serif;font-weight:600;padding:.5rem 1.5rem;transition:opacity .2s;}
-.stButton>button:hover{opacity:.85;}
-div[data-testid="stMetricValue"]{font-family:'Syne',sans-serif;color:#a78bfa;}
-.stProgress>div>div{background:linear-gradient(90deg,#7c3aed,#60a5fa);}
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;800&family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
+
+/* ── Root variables ── */
+:root {
+  --bg:        #0a0a0f;
+  --surface:   #111118;
+  --border:    #1e1e2e;
+  --accent:    #00d4aa;
+  --accent2:   #ff6b35;
+  --text:      #e2e2e8;
+  --muted:     #6b6b7e;
+  --danger:    #ff4d6d;
+  --success:   #00d4aa;
+}
+
+html,body,[class*="css"]{
+  font-family:'IBM Plex Sans',sans-serif;
+  color:var(--text);
+}
+
+/* ── App background — subtle grid texture ── */
+.stApp {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(rgba(0,212,170,0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,212,170,0.03) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+/* ── Sidebar ── */
+[data-testid="stSidebar"]{
+  background:#0d0d14 !important;
+  border-right:1px solid var(--border);
+}
+[data-testid="stSidebar"] * { color: var(--text) !important; }
+
+/* ── Header ── */
+.finora-header{
+  text-align:left;
+  padding:2rem 0 1rem 0;
+  border-bottom:1px solid var(--border);
+  margin-bottom:1.5rem;
+}
+.finora-logo{
+  font-family:'Playfair Display',serif;
+  font-size:2.8rem;
+  font-weight:800;
+  color:var(--text);
+  letter-spacing:-1px;
+  line-height:1;
+}
+.finora-logo span{color:var(--accent);}
+.finora-tagline{
+  font-family:'IBM Plex Mono',monospace;
+  font-size:.78rem;
+  color:var(--muted);
+  margin-top:.4rem;
+  letter-spacing:.15em;
+  text-transform:uppercase;
+}
+.finora-badges{
+  display:flex;
+  gap:.5rem;
+  flex-wrap:wrap;
+  margin-top:.8rem;
+}
+.badge{
+  font-family:'IBM Plex Mono',monospace;
+  background:transparent;
+  border:1px solid var(--border);
+  border-radius:3px;
+  padding:.15rem .6rem;
+  font-size:.68rem;
+  color:var(--muted);
+  letter-spacing:.05em;
+  text-transform:uppercase;
+}
+
+/* ── Section titles ── */
+.section-title{
+  font-family:'Playfair Display',serif;
+  font-size:1.25rem;
+  font-weight:700;
+  color:var(--text);
+  margin:1.5rem 0 .8rem 0;
+  padding-bottom:.4rem;
+  border-bottom:1px solid var(--border);
+}
+.ai-badge{
+  display:inline-block;
+  font-family:'IBM Plex Mono',monospace;
+  font-size:.6rem;
+  font-weight:600;
+  letter-spacing:.12em;
+  text-transform:uppercase;
+  background:var(--accent);
+  color:#000;
+  padding:2px 7px;
+  border-radius:2px;
+  margin-left:8px;
+  vertical-align:middle;
+}
+
+/* ── Cards ── */
+.card{
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:4px;
+  padding:1.2rem;
+  margin-bottom:.6rem;
+  position:relative;
+}
+.card::before{
+  content:'';
+  position:absolute;
+  left:0;top:0;bottom:0;
+  width:2px;
+  background:var(--accent);
+  border-radius:2px 0 0 2px;
+}
+.alert-card{
+  background:rgba(255,77,109,0.06);
+  border:1px solid rgba(255,77,109,0.25);
+  border-radius:4px;
+  padding:.85rem 1rem;
+  margin-bottom:.5rem;
+  font-size:.92rem;
+  border-left:2px solid var(--danger);
+}
+.success-card{
+  background:rgba(0,212,170,0.06);
+  border:1px solid rgba(0,212,170,0.2);
+  border-radius:4px;
+  padding:.85rem 1rem;
+  margin-bottom:.5rem;
+  font-size:.92rem;
+  border-left:2px solid var(--success);
+}
+.insight-card{
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:4px;
+  padding:.85rem 1rem;
+  margin-bottom:.5rem;
+  font-size:.92rem;
+  line-height:1.6;
+  border-left:2px solid rgba(0,212,170,0.4);
+}
+.scenario-card{
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:4px;
+  padding:1.1rem;
+  margin-bottom:.6rem;
+}
+.scenario-title{
+  font-family:'IBM Plex Mono',monospace;
+  font-weight:600;
+  font-size:.85rem;
+  text-transform:uppercase;
+  letter-spacing:.08em;
+  margin-bottom:.5rem;
+  color:var(--accent);
+}
+
+/* ── Chat ── */
+.chat-user{
+  background:rgba(255,255,255,0.04);
+  border:1px solid var(--border);
+  border-radius:2px 12px 12px 12px;
+  padding:.8rem 1rem;
+  margin:.4rem 3rem .4rem 0;
+  font-size:.9rem;
+  line-height:1.5;
+}
+.chat-bot{
+  background:rgba(0,212,170,0.05);
+  border:1px solid rgba(0,212,170,0.15);
+  border-radius:12px 2px 12px 12px;
+  padding:.8rem 1rem;
+  margin:.4rem 0 .4rem 3rem;
+  font-size:.9rem;
+  line-height:1.6;
+}
+.chat-label-user{
+  font-family:'IBM Plex Mono',monospace;
+  font-size:.65rem;
+  color:var(--muted);
+  letter-spacing:.1em;
+  text-transform:uppercase;
+  margin-bottom:3px;
+}
+.chat-label-bot{
+  font-family:'IBM Plex Mono',monospace;
+  font-size:.65rem;
+  color:var(--accent);
+  letter-spacing:.1em;
+  text-transform:uppercase;
+  margin-bottom:3px;
+}
+
+/* ── Tax cards ── */
+.tax-old{
+  background:rgba(255,77,109,0.05);
+  border:1px solid rgba(255,77,109,0.2);
+  border-radius:4px;
+  padding:1.4rem;
+}
+.tax-new{
+  background:rgba(0,212,170,0.05);
+  border:1px solid rgba(0,212,170,0.2);
+  border-radius:4px;
+  padding:1.4rem;
+}
+.tax-row{
+  display:flex;
+  justify-content:space-between;
+  font-size:.85rem;
+  padding:.3rem 0;
+  border-bottom:1px solid var(--border);
+  font-family:'IBM Plex Mono',monospace;
+}
+.tax-total{
+  font-family:'IBM Plex Mono',monospace;
+  font-weight:600;
+  font-size:1.1rem;
+  margin-top:.5rem;
+  color:var(--accent);
+}
+.recommend-banner{
+  background:var(--surface);
+  border:1px solid var(--accent);
+  border-radius:4px;
+  padding:1.25rem 1.5rem;
+  text-align:center;
+  margin-top:1.5rem;
+}
+.recommend-text{
+  font-family:'Playfair Display',serif;
+  font-size:1.4rem;
+  font-weight:700;
+  color:var(--accent);
+}
+.recommend-reason{font-size:.88rem;color:var(--muted);margin-top:.3rem;}
+
+/* ── API key box ── */
+.api-key-box{
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:4px;
+  padding:.9rem 1.1rem;
+  margin-bottom:.8rem;
+  font-size:.85rem;
+}
+
+/* ── Buttons ── */
+.stButton>button{
+  background:var(--accent) !important;
+  color:#000 !important;
+  border:none !important;
+  border-radius:3px !important;
+  font-family:'IBM Plex Mono',monospace !important;
+  font-weight:600 !important;
+  font-size:.8rem !important;
+  letter-spacing:.08em !important;
+  text-transform:uppercase !important;
+  padding:.5rem 1.4rem !important;
+  transition:opacity .15s !important;
+}
+.stButton>button:hover{opacity:.8 !important;}
+
+/* ── Metrics ── */
+div[data-testid="stMetricValue"]{
+  font-family:'IBM Plex Mono',monospace !important;
+  color:var(--accent) !important;
+  font-size:1.6rem !important;
+}
+div[data-testid="stMetricLabel"]{
+  font-family:'IBM Plex Sans',sans-serif !important;
+  color:var(--muted) !important;
+  font-size:.78rem !important;
+  text-transform:uppercase !important;
+  letter-spacing:.08em !important;
+}
+div[data-testid="stMetricDelta"]{font-size:.75rem !important;}
+
+/* ── Progress ── */
+.stProgress>div>div{background:var(--accent);}
+
+/* ── Inputs and selects ── */
+.stTextInput>div>div>input,
+.stNumberInput>div>div>input,
+.stSelectbox>div>div{
+  background:var(--surface) !important;
+  border:1px solid var(--border) !important;
+  border-radius:3px !important;
+  color:var(--text) !important;
+  font-family:'IBM Plex Sans',sans-serif !important;
+}
+
+/* ── Dataframe ── */
+.stDataFrame{border:1px solid var(--border) !important;border-radius:4px;}
+
+/* ── Divider ── */
+hr{border-color:var(--border) !important;}
+
+/* ── Expander ── */
+details summary{
+  font-family:'IBM Plex Mono',monospace !important;
+  font-size:.82rem !important;
+  color:var(--text) !important;
+}
+
+/* ── Sidebar navigation — full clickable rows ── */
+[data-testid="stSidebar"] .stRadio > div {
+  gap:0 !important;
+}
+[data-testid="stSidebar"] .stRadio label {
+  display:flex !important;
+  align-items:center !important;
+  width:100% !important;
+  padding:.55rem .9rem !important;
+  margin:1px 0 !important;
+  border-radius:3px !important;
+  cursor:pointer !important;
+  font-family:'IBM Plex Sans',sans-serif !important;
+  font-size:.85rem !important;
+  color:#9999aa !important;
+  transition:background .15s, color .15s !important;
+  border:none !important;
+  background:transparent !important;
+}
+[data-testid="stSidebar"] .stRadio label:hover {
+  background:rgba(0,212,170,0.07) !important;
+  color:#e2e2e8 !important;
+}
+[data-testid="stSidebar"] .stRadio label[data-checked="true"],
+[data-testid="stSidebar"] .stRadio label:has(input:checked) {
+  background:rgba(0,212,170,0.1) !important;
+  color:#00d4aa !important;
+  border-left:2px solid #00d4aa !important;
+  padding-left:.7rem !important;
+}
+/* Hide the actual radio circle */
+[data-testid="stSidebar"] .stRadio label > div:first-child {
+  display:none !important;
+}
+[data-testid="stSidebar"] .stRadio label > div:last-child p {
+  font-size:.85rem !important;
+  margin:0 !important;
+}
+/* Nav section header */
+[data-testid="stSidebar"] h3 {
+  font-family:'IBM Plex Mono',monospace !important;
+  font-size:.65rem !important;
+  letter-spacing:.15em !important;
+  text-transform:uppercase !important;
+  color:#444455 !important;
+  margin:1.2rem 0 .3rem .9rem !important;
+}
+/* Sidebar brand */
+[data-testid="stSidebar"] .sidebar-brand {
+  padding:.8rem .9rem 1rem .9rem;
+  border-bottom:1px solid #1e1e2e;
+  margin-bottom:.5rem;
+}
+.sidebar-brand-name {
+  font-family:'Playfair Display',serif;
+  font-size:1.4rem;
+  font-weight:700;
+  color:#e2e2e8;
+}
+.sidebar-brand-name span { color:#00d4aa; }
+.sidebar-brand-sub {
+  font-family:'IBM Plex Mono',monospace;
+  font-size:.6rem;
+  color:#444455;
+  letter-spacing:.12em;
+  text-transform:uppercase;
+  margin-top:.1rem;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -83,19 +431,18 @@ div[data-testid="stMetricValue"]{font-family:'Syne',sans-serif;color:#a78bfa;}
 
 st.markdown("""
 <div class="finora-header">
-    <div class="finora-logo">💎 Finora</div>
-    <div class="finora-tagline">AI-Powered Financial Intelligence System for India</div>
+    <div class="finora-logo">Fin<span>ora</span></div>
+    <div class="finora-tagline">AI Financial Intelligence &nbsp;·&nbsp; India &nbsp;·&nbsp; v3.0</div>
     <div class="finora-badges">
-        <span class="badge">🐍 Python</span>
-        <span class="badge">⚡ Streamlit</span>
-        <span class="badge">🤖 LLM (Groq / NVIDIA)</span>
-        <span class="badge">🔍 RAG Engine</span>
-        <span class="badge">📊 Pandas</span>
-        <span class="badge">🏦 Indian Banks</span>
+        <span class="badge">Python</span>
+        <span class="badge">Streamlit</span>
+        <span class="badge">LLM · RAG</span>
+        <span class="badge">FAISS</span>
+        <span class="badge">pdfplumber</span>
+        <span class="badge">Indian Banks</span>
     </div>
 </div>
 """, unsafe_allow_html=True)
-st.markdown("---")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -103,32 +450,36 @@ st.markdown("---")
 # ─────────────────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.markdown("### 🔑 AI API Key")
+    # Brand in sidebar
+    st.markdown('''<div class="sidebar-brand">
+        <div class="sidebar-brand-name">Fin<span>ora</span></div>
+        <div class="sidebar-brand-sub">Financial Intelligence</div>
+    </div>''', unsafe_allow_html=True)
+
+    st.markdown("### AI API Key")
     st.markdown(
         '<div class="api-key-box">'
-        '🆓 <b>NVIDIA</b> (recommended — no limit)<br>'
-        '<a href="https://build.nvidia.com" target="_blank" style="color:#a78bfa;">build.nvidia.com</a>'
-        ' → key starts with <code>nvapi-</code><br><br>'
-        '🆓 <b>Groq</b> (fast &amp; free)<br>'
-        '<a href="https://console.groq.com" target="_blank" style="color:#a78bfa;">console.groq.com</a>'
-        ' → key starts with <code>gsk_</code>'
+        '<b>NVIDIA</b> — no limit &nbsp;<a href="https://build.nvidia.com" target="_blank" style="color:#00d4aa;">build.nvidia.com</a><br>'
+        '<small style="color:#6b6b7e;">key starts with nvapi-</small><br><br>'
+        '<b>Groq</b> — fast & free &nbsp;<a href="https://console.groq.com" target="_blank" style="color:#00d4aa;">console.groq.com</a><br>'
+        '<small style="color:#6b6b7e;">key starts with gsk_</small>'
         '</div>', unsafe_allow_html=True,
     )
-    api_key_input = st.text_input("Paste your API key", type="password",
+    api_key_input = st.text_input("API key", type="password",
                                    placeholder="nvapi-... or gsk_...", label_visibility="collapsed")
     gemini_ready = False
     if api_key_input:
         try:
             init_gemini(api_key_input)
             gemini_ready = True
-            st.success("✅ AI connected!")
+            st.success("✅ Connected")
         except Exception as e:
             st.error(f"❌ {e}")
     else:
         st.caption("Without a key, rule-based fallbacks are used.")
 
     st.markdown("---")
-    st.markdown("### 🗂️ Navigation")
+    st.markdown("### Menu")
     active_tab = st.radio("Navigation", [
         "🏠 Dashboard",
         "📄 Bank Statement",
